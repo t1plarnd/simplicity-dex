@@ -3,7 +3,11 @@
 mod cli;
 mod config;
 mod error;
+mod explorer;
+mod fee;
+mod logging;
 mod metadata;
+mod signing;
 mod sync;
 mod wallet;
 
@@ -15,7 +19,9 @@ use clap::Parser;
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
-    Cli::parse().run().await?;
+    logging::init();
+
+    Box::pin(Cli::parse().run()).await?;
 
     Ok(())
 }

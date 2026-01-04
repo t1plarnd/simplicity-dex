@@ -4,19 +4,24 @@ mod interactive;
 mod option;
 mod positions;
 mod swap;
+mod sync;
 mod tx;
 mod wallet;
+
+use crate::error::Error;
+
+use crate::config::{Config, default_config_path};
+use crate::wallet::Wallet;
 
 use std::path::PathBuf;
 
 use clap::Parser;
+use nostr::SecretKey;
+use options_relay::{PublishingClient, ReadOnlyClient};
 
-use crate::config::{Config, default_config_path};
-use crate::error::Error;
-pub use commands::{Command, OptionCommand, SwapCommand, TxCommand, WalletCommand};
 use signer::Signer;
 
-use crate::wallet::Wallet;
+pub use commands::{Command, OptionCommand, SwapCommand, SyncCommand, TxCommand, WalletCommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "simplicity-dex")]
@@ -62,16 +67,38 @@ impl Cli {
         Wallet::open(&seed, &db_path, config.address_params()).await
     }
 
+    async fn get_read_only_client(&self, config: &Config) -> Result<ReadOnlyClient, Error> {
+        let relay_config = config.relay.get_nostr_relay_config();
+
+        let client = ReadOnlyClient::connect(relay_config).await?;
+
+        Ok(client)
+    }
+
+    async fn get_publishing_client(&self, config: &Config) -> Result<PublishingClient, Error> {
+        let seed = self.parse_seed()?;
+        let relay_config = config.relay.get_nostr_relay_config();
+
+        let secret_key =
+            SecretKey::from_slice(&seed).map_err(|e| Error::Config(format!("Invalid seed for NOSTR key: {e}")))?;
+        let keys = nostr::Keys::new(secret_key);
+
+        let client = PublishingClient::connect(relay_config, keys).await?;
+
+        Ok(client)
+    }
+
     pub async fn run(&self) -> Result<(), Error> {
         let config = self.load_config();
 
         match &self.command {
             Command::Wallet { command } => self.run_wallet(config, command).await,
             Command::Tx { command } => self.run_tx(config, command).await,
-            Command::Option { command } => self.run_option(config, command).await,
-            Command::Swap { command } => self.run_swap(config, command).await,
+            Command::Option { command } => Box::pin(self.run_option(config, command)).await,
+            Command::Swap { command } => Box::pin(self.run_swap(config, command)).await,
             Command::Browse => self.run_browse(config).await,
             Command::Positions => self.run_positions(config).await,
+            Command::Sync { command } => self.run_sync(config, command).await,
             Command::Config => {
                 println!("{config:#?}");
                 Ok(())

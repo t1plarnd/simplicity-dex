@@ -21,7 +21,7 @@ pub enum Command {
         command: OptionCommand,
     },
 
-    /// Swap lifecycle (create, take, cancel)
+    /// Swap lifecycle (create, take, cancel, withdraw)
     Swap {
         #[command(subcommand)]
         command: SwapCommand,
@@ -32,6 +32,12 @@ pub enum Command {
 
     /// Show my holdings with expiration warnings
     Positions,
+
+    /// Sync coin-store with blockchain via Esplora and/or NOSTR
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
 
     /// Show current configuration
     Config,
@@ -85,9 +91,9 @@ pub enum TxCommand {
         /// Amount to send
         #[arg(long)]
         amount: u64,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
@@ -97,10 +103,10 @@ pub enum TxCommand {
     SplitNative {
         /// Number of parts to split into
         #[arg(long)]
-        parts: u64,
-        /// Fee amount in satoshis
+        count: u64,
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
@@ -114,9 +120,9 @@ pub enum TxCommand {
         /// Number of UTXOs to merge
         #[arg(long)]
         count: usize,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
@@ -127,9 +133,9 @@ pub enum TxCommand {
         /// Amount to issue
         #[arg(long)]
         amount: u64,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
@@ -143,9 +149,9 @@ pub enum TxCommand {
         /// Amount to reissue
         #[arg(long)]
         amount: u64,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
@@ -160,34 +166,37 @@ pub enum OptionCommand {
         /// Collateral asset ID
         #[arg(long)]
         collateral_asset: AssetId,
-        /// Collateral amount
+        /// Total collateral to lock in the contract
         #[arg(long)]
-        collateral_amount: u64,
+        total_collateral: u64,
+        /// Number of option contracts (tokens) to issue
+        #[arg(long)]
+        num_contracts: u64,
         /// Settlement asset ID
         #[arg(long)]
         settlement_asset: AssetId,
-        /// Settlement amount
+        /// Total strike price (settlement needed to exercise ALL contracts)
         #[arg(long)]
-        settlement_amount: u64,
+        total_strike: u64,
         /// Expiry time as Unix timestamp or duration (e.g., +30d)
         #[arg(long)]
         expiry: String,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
     },
 
-    /// Exercise an option before expiration (deposit settlement, get collateral)
+    /// Exercise an option before expiration (deposit settlement, get collateral, burn option)
     Exercise {
-        /// Grantor token outpoint (interactive selection if not provided)
+        /// Option token outpoint (interactive selection if not provided)
         #[arg(long)]
-        grantor_token: Option<OutPoint>,
-        /// Fee amount in satoshis
+        option_token: Option<OutPoint>,
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
@@ -198,9 +207,22 @@ pub enum OptionCommand {
         /// Grantor token outpoint (interactive selection if not provided)
         #[arg(long)]
         grantor_token: Option<OutPoint>,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
+        /// Broadcast transaction
+        #[arg(long)]
+        broadcast: bool,
+    },
+
+    /// Claim settlement after options were exercised (use Grantor Token to get settlement asset)
+    Settlement {
+        /// Grantor token outpoint (interactive selection if not provided)
+        #[arg(long)]
+        grantor_token: Option<OutPoint>,
+        /// Fee amount in satoshis (auto-estimated if not specified)
+        #[arg(long)]
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
@@ -211,9 +233,9 @@ pub enum OptionCommand {
         /// Option token outpoint (interactive selection if not provided)
         #[arg(long)]
         option_token: Option<OutPoint>,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
@@ -237,9 +259,9 @@ pub enum SwapCommand {
         /// Expiry time (defaults to same as option)
         #[arg(long)]
         expiry: Option<String>,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction and publish to NOSTR
         #[arg(long)]
         broadcast: bool,
@@ -250,24 +272,53 @@ pub enum SwapCommand {
         /// Swap event ID from NOSTR (interactive selection if not provided)
         #[arg(long)]
         swap_event: Option<String>,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
     },
 
-    /// Cancel a swap offer (before it's taken)
+    /// Cancel a swap offer after expiry (reclaim collateral if no one took it)
     Cancel {
         /// Swap event ID from NOSTR (interactive selection if not provided)
         #[arg(long)]
         swap_event: Option<String>,
-        /// Fee amount in satoshis
+        /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
         /// Broadcast transaction
         #[arg(long)]
         broadcast: bool,
     },
+
+    /// Withdraw settlement after swap was taken (claim your payment)
+    Withdraw {
+        /// Swap event ID from NOSTR (interactive selection if not provided)
+        #[arg(long)]
+        swap_event: Option<String>,
+        /// Fee amount in satoshis (auto-estimated if not specified)
+        #[arg(long)]
+        fee: Option<u64>,
+        /// Broadcast transaction
+        #[arg(long)]
+        broadcast: bool,
+    },
+}
+
+/// Sync commands for reconciling coin-store with blockchain
+#[derive(Debug, Subcommand)]
+pub enum SyncCommand {
+    /// Full sync: mark spent UTXOs + discover new UTXOs + sync NOSTR events
+    Full,
+
+    /// Only check and mark spent UTXOs as spent via Esplora
+    Spent,
+
+    /// Only discover new UTXOs for wallet address and tracked contracts via Esplora
+    Utxos,
+
+    /// Only sync options and swaps from NOSTR relay
+    Nostr,
 }

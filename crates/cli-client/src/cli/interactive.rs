@@ -1,55 +1,81 @@
-//! Interactive selection UI helpers for CLI commands.
-//!
-//! Provides table display and prompt functions for selecting tokens,
-//! options, and swaps interactively.
+use crate::error::Error;
 
 use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Display information about a token for selection tables.
+use coin_store::{UtxoEntry, UtxoFilter, UtxoQueryResult, UtxoStore};
+
+use contracts::options::OptionsArguments;
+
+use simplicityhl::elements::Script;
+use simplicityhl::elements::hex::ToHex;
+use simplicityhl_core::LIQUID_TESTNET_BITCOIN_ASSET;
+
 #[derive(Debug, Clone)]
 pub struct TokenDisplay {
-    /// Index for selection (1-based for user display)
     pub index: usize,
-    /// The outpoint string (txid:vout)
+    #[allow(dead_code)]
     pub outpoint: String,
-    /// Collateral description (e.g., "115,958 USDt")
     pub collateral: String,
-    /// Settlement description (e.g., "1.0083 LBTC")
     pub settlement: String,
-    /// Expiry description (e.g., "in 28 days" or "[SOON] in 6 hours")
     pub expires: String,
-    /// Current status
     pub status: String,
 }
 
-/// Display information about a swap for selection tables.
 #[derive(Debug, Clone)]
 pub struct SwapDisplay {
-    /// Index for selection (1-based for user display)
     pub index: usize,
-    /// The NOSTR event ID
+    #[allow(dead_code)]
     pub event_id: String,
-    /// What the swap is offering (e.g., "Grantor (115k USDt)")
     pub offering: String,
-    /// What the swap wants (e.g., "0.05 LBTC")
     pub wants: String,
-    /// Expiry description
     pub expires: String,
-    /// Seller's NOSTR public key (truncated)
     pub seller: String,
 }
 
-/// Format a duration relative to now with urgency indicators.
-///
-/// Returns strings like:
-/// - `[EXPIRED]` - past expiry
-/// - `[URGENT] in 45 minutes` - less than 1 hour
-/// - `[SOON] in 6 hours` - less than 24 hours
-/// - `in 3 days 12 hours` - normal
+/// Format a past timestamp as "X ago" for history entries.
 #[must_use]
+#[allow(clippy::cast_possible_wrap)]
+pub fn format_time_ago(timestamp: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let diff_secs = now - timestamp;
+
+    if diff_secs <= 0 {
+        return "just now".to_string();
+    }
+
+    let hours = diff_secs / 3600;
+    let days = hours / 24;
+    let remaining_hours = hours % 24;
+
+    if days > 0 {
+        if remaining_hours > 0 {
+            format!("{days} days {remaining_hours} hours ago")
+        } else {
+            format!("{days} days ago")
+        }
+    } else if hours > 0 {
+        format!("{hours} hours ago")
+    } else {
+        let minutes = diff_secs / 60;
+        if minutes > 0 {
+            format!("{minutes} minutes ago")
+        } else {
+            format!("{diff_secs} seconds ago")
+        }
+    }
+}
+
+/// Format a future expiry timestamp as "in X days" or "[EXPIRED]".
+#[must_use]
+#[allow(clippy::cast_possible_wrap)]
 pub fn format_relative_time(expiry_timestamp: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
@@ -65,32 +91,31 @@ pub fn format_relative_time(expiry_timestamp: i64) -> String {
 
     let time_str = if days > 0 {
         if remaining_hours > 0 {
-            format!("in {} days {} hours", days, remaining_hours)
+            format!("in {days} days {remaining_hours} hours")
         } else {
-            format!("in {} days", days)
+            format!("in {days} days")
         }
     } else if hours > 0 {
-        format!("in {} hours", hours)
+        format!("in {hours} hours")
     } else {
         let minutes = diff_secs / 60;
         if minutes > 0 {
-            format!("in {} minutes", minutes)
+            format!("in {minutes} minutes")
         } else {
-            format!("in {} seconds", diff_secs)
+            format!("in {diff_secs} seconds")
         }
     };
 
     // Add urgency prefix
     if hours < 1 {
-        format!("[URGENT] {}", time_str)
+        format!("[URGENT] {time_str}")
     } else if hours < 24 {
-        format!("[SOON] {}", time_str)
+        format!("[SOON] {time_str}")
     } else {
         time_str
     }
 }
 
-/// Display a table of tokens for selection.
 pub fn display_token_table(tokens: &[TokenDisplay]) {
     if tokens.is_empty() {
         println!("  (No tokens found)");
@@ -98,8 +123,8 @@ pub fn display_token_table(tokens: &[TokenDisplay]) {
     }
 
     println!(
-        "  {:<3} | {:<18} | {:<14} | {:<18} | {}",
-        "#", "Collateral", "Settlement", "Expires", "Status"
+        "  {:<3} | {:<18} | {:<14} | {:<18} | Contract",
+        "#", "Tokens", "Settlement", "Expires"
     );
     println!("{}", "-".repeat(80));
 
@@ -111,7 +136,6 @@ pub fn display_token_table(tokens: &[TokenDisplay]) {
     }
 }
 
-/// Display a table of swaps for selection.
 pub fn display_swap_table(swaps: &[SwapDisplay]) {
     if swaps.is_empty() {
         println!("  (No swaps found)");
@@ -119,8 +143,8 @@ pub fn display_swap_table(swaps: &[SwapDisplay]) {
     }
 
     println!(
-        "  {:<3} | {:<20} | {:<14} | {:<15} | {}",
-        "#", "Offering", "Wants", "Expires", "Seller"
+        "  {:<3} | {:<20} | {:<14} | {:<15} | Seller",
+        "#", "Price", "Wants", "Expires"
     );
     println!("{}", "-".repeat(80));
 
@@ -132,11 +156,8 @@ pub fn display_swap_table(swaps: &[SwapDisplay]) {
     }
 }
 
-/// Prompt user to select from a numbered list.
-///
-/// Returns the 0-based index of the selected item, or None if user quits.
 pub fn prompt_selection(prompt: &str, max: usize) -> io::Result<Option<usize>> {
-    print!("{} (1-{}, or 'q' to quit): ", prompt, max);
+    print!("{prompt} (1-{max}, or 'q' to quit): ");
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -150,33 +171,32 @@ pub fn prompt_selection(prompt: &str, max: usize) -> io::Result<Option<usize>> {
     match input.parse::<usize>() {
         Ok(n) if n >= 1 && n <= max => Ok(Some(n - 1)), // Convert to 0-based
         _ => {
-            println!("Invalid selection. Please enter a number between 1 and {}.", max);
+            println!("Invalid selection. Please enter a number between 1 and {max}.");
             prompt_selection(prompt, max) // Retry
         }
     }
 }
 
-/// Prompt user for an amount value.
 pub fn prompt_amount(prompt: &str) -> io::Result<u64> {
-    print!("{}: ", prompt);
+    print!("{prompt}: ");
     io::stdout().flush()?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     let input = input.trim();
 
-    match input.parse::<u64>() {
-        Ok(amount) => Ok(amount),
-        Err(_) => {
+    input.parse::<u64>().map_or_else(
+        |_| {
             println!("Invalid amount. Please enter a positive number.");
             prompt_amount(prompt) // Retry
-        }
-    }
+        },
+        Ok,
+    )
 }
 
-/// Prompt user for a yes/no confirmation.
+#[allow(dead_code)]
 pub fn prompt_confirm(prompt: &str) -> io::Result<bool> {
-    print!("{} [y/N]: ", prompt);
+    print!("{prompt} [y/N]: ");
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -186,7 +206,6 @@ pub fn prompt_confirm(prompt: &str) -> io::Result<bool> {
     Ok(input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes"))
 }
 
-/// Truncate a string with ellipsis if too long.
 #[must_use]
 pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
@@ -198,8 +217,8 @@ pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
     }
 }
 
-/// Format a satoshi amount as a human-readable string.
 #[must_use]
+#[allow(dead_code, clippy::cast_precision_loss)]
 pub fn format_sats(sats: u64) -> String {
     if sats >= 100_000_000 {
         format!("{:.4} BTC", sats as f64 / 100_000_000.0)
@@ -208,7 +227,290 @@ pub fn format_sats(sats: u64) -> String {
     } else if sats >= 1_000 {
         format!("{:.1}k sats", sats as f64 / 1_000.0)
     } else {
-        format!("{} sats", sats)
+        format!("{sats} sats")
+    }
+}
+
+pub fn parse_expiry(expiry: &str) -> Result<i64, Error> {
+    if let Ok(ts) = expiry.parse::<i64>() {
+        return Ok(ts);
+    }
+
+    // Try parsing as relative duration (+30d, +2h, +1w, etc.)
+    if let Some(duration_str) = expiry.strip_prefix('+') {
+        let now = current_timestamp();
+        let duration_secs = parse_duration(duration_str)?;
+        return Ok(now + duration_secs);
+    }
+
+    Err(Error::Config(format!(
+        "Invalid expiry format '{expiry}'. Use Unix timestamp or relative duration (+30d, +2h, +1w)"
+    )))
+}
+
+#[allow(clippy::cast_possible_wrap)]
+pub fn current_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+pub fn parse_duration(s: &str) -> Result<i64, Error> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(Error::Config("Empty duration".to_string()));
+    }
+
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let num: i64 = num_str
+        .parse()
+        .map_err(|_| Error::Config(format!("Invalid duration number: {num_str}")))?;
+
+    let multiplier = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        "w" => 604_800,
+        _ => return Err(Error::Config(format!("Invalid duration unit: {unit}. Use s/m/h/d/w"))),
+    };
+
+    Ok(num * multiplier)
+}
+
+pub fn extract_entries_from_result(result: &UtxoQueryResult) -> Vec<&UtxoEntry> {
+    match result {
+        UtxoQueryResult::Found(entries, _) | UtxoQueryResult::InsufficientValue(entries, _) => entries.iter().collect(),
+        UtxoQueryResult::Empty => Vec::new(),
+    }
+}
+
+pub fn extract_entries_from_results(results: Vec<UtxoQueryResult>) -> Vec<UtxoEntry> {
+    results
+        .into_iter()
+        .flat_map(|r| match r {
+            UtxoQueryResult::Found(entries, _) | UtxoQueryResult::InsufficientValue(entries, _) => entries,
+            UtxoQueryResult::Empty => vec![],
+        })
+        .collect()
+}
+
+/// Get contract UTXOs at the contract address by source.
+/// NOTE: This returns UTXOs at the contract address itself (collateral, reissuance tokens),
+/// NOT user-held tokens. For user-held option/grantor tokens, use `get_option_tokens_from_wallet`
+/// or `get_grantor_tokens_from_wallet`.
+#[allow(dead_code)]
+pub async fn get_contract_tokens(wallet: &crate::wallet::Wallet, source: &str) -> Result<Vec<UtxoEntry>, Error> {
+    let filter = UtxoFilter::new().source(source);
+    let results = <_ as UtxoStore>::query_utxos(wallet.store(), &[filter]).await?;
+    Ok(extract_entries_from_results(results))
+}
+
+/// Get grantor tokens from user's wallet by looking up stored option contracts.
+///
+/// This function:
+/// 1. Lists all option contracts stored in the database
+/// 2. Extracts grantor token asset IDs from each contract's arguments
+/// 3. Queries user's wallet for those specific asset IDs
+/// 4. Returns all found grantor token UTXOs with their associated contract arguments
+pub async fn get_grantor_tokens_from_wallet(
+    wallet: &crate::wallet::Wallet,
+    source: &str,
+    user_script_pubkey: &Script,
+) -> Result<Vec<EnrichedTokenEntry>, Error> {
+    let contracts = <_ as UtxoStore>::list_contracts_by_source(wallet.store(), source).await?;
+
+    if contracts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Build a map of grantor token asset ID -> (OptionsArguments, taproot_pubkey_gen_str)
+    let mut asset_to_args: std::collections::HashMap<simplicityhl::elements::AssetId, (OptionsArguments, String)> =
+        std::collections::HashMap::new();
+
+    for (arguments_bytes, taproot_pubkey_gen_str) in &contracts {
+        let arguments_result: Result<(simplicityhl::Arguments, usize), _> =
+            bincode::serde::decode_from_slice(arguments_bytes, bincode::config::standard());
+
+        if let Ok((arguments, _)) = arguments_result
+            && let Ok(option_arguments) = OptionsArguments::from_arguments(&arguments)
+        {
+            let (grantor_token_id, _) = option_arguments.get_grantor_token_ids();
+            asset_to_args.insert(grantor_token_id, (option_arguments, taproot_pubkey_gen_str.clone()));
+        }
+    }
+
+    if asset_to_args.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let filters: Vec<UtxoFilter> = asset_to_args
+        .keys()
+        .map(|asset_id| {
+            UtxoFilter::new()
+                .asset_id(*asset_id)
+                .script_pubkey(user_script_pubkey.clone())
+        })
+        .collect();
+
+    let results = <_ as UtxoStore>::query_utxos(wallet.store(), &filters).await?;
+    let entries = extract_entries_from_results(results);
+
+    // Enrich entries with their corresponding option arguments
+    let mut enriched: Vec<EnrichedTokenEntry> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            entry.asset().and_then(|asset_id| {
+                asset_to_args.get(&asset_id).map(|(args, tpg_str)| EnrichedTokenEntry {
+                    entry,
+                    option_arguments: args.clone(),
+                    taproot_pubkey_gen_str: tpg_str.clone(),
+                })
+            })
+        })
+        .collect();
+
+    // Sort by value descending for consistent ordering
+    enriched.sort_by(|a, b| b.entry.value().unwrap_or(0).cmp(&a.entry.value().unwrap_or(0)));
+
+    Ok(enriched)
+}
+
+/// A token entry enriched with its associated contract arguments.
+#[derive(Debug)]
+pub struct EnrichedTokenEntry {
+    pub entry: UtxoEntry,
+    pub option_arguments: OptionsArguments,
+    pub taproot_pubkey_gen_str: String,
+}
+
+/// Get option tokens from user's wallet by looking up stored option contracts.
+///
+/// This function:
+/// 1. Lists all option contracts stored in the database
+/// 2. Extracts option token asset IDs from each contract's arguments
+/// 3. Queries user's wallet for those specific asset IDs
+/// 4. Returns all found option token UTXOs with their associated contract arguments
+pub async fn get_option_tokens_from_wallet(
+    wallet: &crate::wallet::Wallet,
+    source: &str,
+    user_script_pubkey: &Script,
+) -> Result<Vec<EnrichedTokenEntry>, Error> {
+    let contracts = <_ as UtxoStore>::list_contracts_by_source(wallet.store(), source).await?;
+
+    if contracts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Build a map of option token asset ID -> (OptionsArguments, taproot_pubkey_gen_str)
+    let mut asset_to_args: std::collections::HashMap<simplicityhl::elements::AssetId, (OptionsArguments, String)> =
+        std::collections::HashMap::new();
+
+    for (arguments_bytes, taproot_pubkey_gen_str) in &contracts {
+        let arguments_result: Result<(simplicityhl::Arguments, usize), _> =
+            bincode::serde::decode_from_slice(arguments_bytes, bincode::config::standard());
+
+        if let Ok((arguments, _)) = arguments_result
+            && let Ok(option_arguments) = OptionsArguments::from_arguments(&arguments)
+        {
+            let (option_token_id, _) = option_arguments.get_option_token_ids();
+            asset_to_args.insert(option_token_id, (option_arguments, taproot_pubkey_gen_str.clone()));
+        }
+    }
+
+    if asset_to_args.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let filters: Vec<UtxoFilter> = asset_to_args
+        .keys()
+        .map(|asset_id| {
+            UtxoFilter::new()
+                .asset_id(*asset_id)
+                .script_pubkey(user_script_pubkey.clone())
+        })
+        .collect();
+
+    let results = <_ as UtxoStore>::query_utxos(wallet.store(), &filters).await?;
+    let entries = extract_entries_from_results(results);
+
+    // Enrich entries with their corresponding option arguments
+    let mut enriched: Vec<EnrichedTokenEntry> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            entry.asset().and_then(|asset_id| {
+                asset_to_args.get(&asset_id).map(|(args, tpg_str)| EnrichedTokenEntry {
+                    entry,
+                    option_arguments: args.clone(),
+                    taproot_pubkey_gen_str: tpg_str.clone(),
+                })
+            })
+        })
+        .collect();
+
+    // Sort by value descending for consistent ordering
+    enriched.sort_by(|a, b| b.entry.value().unwrap_or(0).cmp(&a.entry.value().unwrap_or(0)));
+
+    Ok(enriched)
+}
+
+/// Select from enriched token entries that include contract arguments.
+/// This shows settlement and expiry information from the contract.
+pub fn select_enriched_token_interactive<'a>(
+    entries: &'a [EnrichedTokenEntry],
+    prompt: &str,
+) -> Result<&'a EnrichedTokenEntry, Error> {
+    let displays: Vec<TokenDisplay> = entries
+        .iter()
+        .enumerate()
+        .map(|(idx, enriched)| {
+            let settlement_asset = enriched.option_arguments.get_settlement_asset_id();
+            let settlement_per_contract = enriched.option_arguments.settlement_per_contract();
+            let expiry_time = enriched.option_arguments.expiry_time();
+
+            // Extract contract address from tpg_str (format: "entropy:pubkey:address")
+            let contract_addr = enriched
+                .taproot_pubkey_gen_str
+                .split(':')
+                .next_back()
+                .map_or_else(|| "???".to_string(), |s| truncate_with_ellipsis(s, 12));
+
+            TokenDisplay {
+                index: idx + 1,
+                outpoint: enriched.entry.outpoint().to_string(),
+                collateral: format!("{} tokens", enriched.entry.value().unwrap_or(0)),
+                settlement: format!(
+                    "{} {}",
+                    settlement_per_contract,
+                    format_settlement_asset(&settlement_asset)
+                ),
+                expires: format_relative_time(i64::from(expiry_time)),
+                status: contract_addr,
+            }
+        })
+        .collect();
+
+    if displays.is_empty() {
+        return Err(Error::Config("No valid tokens found".to_string()));
+    }
+
+    display_token_table(&displays);
+    println!();
+
+    let selection = prompt_selection(prompt, displays.len())
+        .map_err(Error::Io)?
+        .ok_or_else(|| Error::Config("Selection cancelled".to_string()))?;
+
+    Ok(&entries[selection])
+}
+
+pub fn format_settlement_asset(asset_id: &simplicityhl::elements::AssetId) -> String {
+    if *asset_id == *LIQUID_TESTNET_BITCOIN_ASSET {
+        "LBTC".to_string()
+    } else {
+        let hex = asset_id.to_hex();
+        format!("({})...", &hex[..hex.len().min(8)])
     }
 }
 
@@ -217,25 +519,19 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::cast_possible_wrap)]
     fn test_format_relative_time() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
 
-        // Expired
         assert_eq!(format_relative_time(now - 100), "[EXPIRED]");
 
-        // Urgent (< 1 hour)
-        let urgent = format_relative_time(now + 1800); // 30 minutes
+        let urgent = format_relative_time(now + 1800);
         assert!(urgent.starts_with("[URGENT]"));
 
-        // Soon (< 24 hours)
-        let soon = format_relative_time(now + 6 * 3600); // 6 hours
+        let soon = format_relative_time(now + 6 * 3600);
         assert!(soon.starts_with("[SOON]"));
 
-        // Normal
-        let normal = format_relative_time(now + 3 * 24 * 3600); // 3 days
+        let normal = format_relative_time(now + 3 * 24 * 3600);
         assert!(normal.starts_with("in 3 days"));
     }
 
@@ -254,4 +550,3 @@ mod tests {
         assert_eq!(format_sats(100_000_000), "1.0000 BTC");
     }
 }
-

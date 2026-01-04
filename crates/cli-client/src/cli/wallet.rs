@@ -17,6 +17,7 @@ impl Cli {
                 Wallet::create(&seed, &db_path, config.address_params()).await?;
 
                 println!("Wallet initialized at {}", db_path.display());
+
                 Ok(())
             }
             WalletCommand::Address => {
@@ -117,4 +118,3 @@ impl Cli {
         }
     }
 }
-
