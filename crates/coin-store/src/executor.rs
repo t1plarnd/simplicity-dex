@@ -38,6 +38,18 @@ pub trait UtxoStore {
         source: &str,
         arguments: Arguments,
         taproot_pubkey_gen: TaprootPubkeyGen,
+        app_metadata: Option<&[u8]>,
+    ) -> Result<(), Self::Error>;
+
+    async fn get_contract_metadata(
+        &self,
+        taproot_pubkey_gen: &TaprootPubkeyGen,
+    ) -> Result<Option<Vec<u8>>, Self::Error>;
+
+    async fn update_contract_metadata(
+        &self,
+        taproot_pubkey_gen: &TaprootPubkeyGen,
+        metadata: &[u8],
     ) -> Result<(), Self::Error>;
 
     /// Process a transaction by inserting its outputs and marking inputs as spent.
@@ -113,6 +125,7 @@ impl UtxoStore for Store {
         source: &str,
         arguments: Arguments,
         taproot_pubkey_gen: TaprootPubkeyGen,
+        app_metadata: Option<&[u8]>,
     ) -> Result<(), Self::Error> {
         let compiled_program =
             CompiledProgram::new(source, arguments.clone(), false).map_err(StoreError::SimplicityCompilation)?;
@@ -132,16 +145,48 @@ impl UtxoStore for Store {
             .await?;
 
         sqlx::query(
-            "INSERT INTO simplicity_contracts (script_pubkey, taproot_pubkey_gen, cmr, source_hash, arguments)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO simplicity_contracts (script_pubkey, taproot_pubkey_gen, cmr, source_hash, arguments, app_metadata)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(script_pubkey.as_bytes())
         .bind(taproot_gen_str)
         .bind(cmr.as_ref())
         .bind(source_hash_bytes)
         .bind(arguments_bytes)
+        .bind(app_metadata)
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    async fn get_contract_metadata(
+        &self,
+        taproot_pubkey_gen: &TaprootPubkeyGen,
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        let taproot_gen_str = taproot_pubkey_gen.to_string();
+
+        let result: Option<(Option<Vec<u8>>,)> =
+            sqlx::query_as("SELECT app_metadata FROM simplicity_contracts WHERE taproot_pubkey_gen = ?")
+                .bind(taproot_gen_str)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(result.and_then(|(metadata,)| metadata))
+    }
+
+    async fn update_contract_metadata(
+        &self,
+        taproot_pubkey_gen: &TaprootPubkeyGen,
+        metadata: &[u8],
+    ) -> Result<(), Self::Error> {
+        let taproot_gen_str = taproot_pubkey_gen.to_string();
+
+        sqlx::query("UPDATE simplicity_contracts SET app_metadata = ? WHERE taproot_pubkey_gen = ?")
+            .bind(metadata)
+            .bind(taproot_gen_str)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -776,11 +821,13 @@ mod tests {
         let arguments = simplicityhl::Arguments::default();
 
         let result = store
-            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments.clone(), tpg1)
+            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments.clone(), tpg1, None)
             .await;
         assert!(result.is_ok());
 
-        let result = store.add_contract(BYTES32_TR_STORAGE_SOURCE, arguments, tpg2).await;
+        let result = store
+            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments, tpg2, None)
+            .await;
         assert!(result.is_ok());
 
         let _ = fs::remove_file(path);
@@ -798,7 +845,7 @@ mod tests {
         let script_pubkey = tpg.address.script_pubkey();
 
         store
-            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments.clone(), tpg)
+            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments.clone(), tpg, None)
             .await
             .unwrap();
 
@@ -837,7 +884,7 @@ mod tests {
         let script_pubkey = tpg.address.script_pubkey();
 
         store
-            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments, tpg.clone())
+            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments, tpg.clone(), None)
             .await
             .unwrap();
 
@@ -873,7 +920,7 @@ mod tests {
         let script_pubkey = tpg.address.script_pubkey();
 
         store
-            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments, tpg)
+            .add_contract(BYTES32_TR_STORAGE_SOURCE, arguments, tpg, None)
             .await
             .unwrap();
 

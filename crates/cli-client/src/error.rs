@@ -34,4 +34,10 @@ pub enum Error {
 
     #[error("Hex to array error: {0}")]
     HexToArray(#[from] HexToArrayError),
+
+    #[error("Metadata encode error: {0}")]
+    MetadataEncode(bincode::error::EncodeError),
+
+    #[error("Metadata decode error: {0}")]
+    MetadataDecode(bincode::error::DecodeError),
 }

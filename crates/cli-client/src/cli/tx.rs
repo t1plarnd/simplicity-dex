@@ -1,4 +1,4 @@
-use crate::cli::{BasicCommand, Cli};
+use crate::cli::{Cli, TxCommand};
 use crate::config::Config;
 use crate::error::Error;
 
@@ -17,9 +17,9 @@ use simplicityhl_core::{LIQUID_TESTNET_BITCOIN_ASSET, LIQUID_TESTNET_GENESIS, fi
 
 impl Cli {
     #[allow(clippy::too_many_lines)]
-    pub(crate) async fn run_basic(&self, config: Config, command: &BasicCommand) -> Result<(), Error> {
+    pub(crate) async fn run_tx(&self, config: Config, command: &TxCommand) -> Result<(), Error> {
         match command {
-            BasicCommand::SplitNative { parts, fee, broadcast } => {
+            TxCommand::SplitNative { parts, fee, broadcast } => {
                 let wallet = self.get_wallet(&config).await?;
 
                 let filter = coin_store::UtxoFilter::new()
@@ -77,7 +77,7 @@ impl Cli {
                     }
                 }
             }
-            BasicCommand::Merge {
+            TxCommand::Merge {
                 asset_id,
                 count,
                 fee,
@@ -245,7 +245,7 @@ impl Cli {
                     }
                 }
             }
-            BasicCommand::Transfer {
+            TxCommand::Transfer {
                 asset_id,
                 to,
                 amount,
@@ -411,7 +411,7 @@ impl Cli {
                     }
                 }
             }
-            BasicCommand::IssueAsset { amount, fee, broadcast } => {
+            TxCommand::IssueAsset { amount, fee, broadcast } => {
                 let wallet = self.get_wallet(&config).await?;
                 let script_pubkey = wallet.signer().p2pk_address(config.address_params())?.script_pubkey();
 
@@ -491,7 +491,7 @@ impl Cli {
                     }
                 }
             }
-            BasicCommand::ReissueAsset {
+            TxCommand::ReissueAsset {
                 asset_id,
                 amount,
                 fee,
@@ -622,3 +622,4 @@ impl Cli {
         Ok(())
     }
 }
+

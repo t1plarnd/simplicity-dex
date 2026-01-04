@@ -3,6 +3,8 @@
 mod cli;
 mod config;
 mod error;
+mod metadata;
+mod sync;
 mod wallet;
 
 use crate::cli::Cli;

@@ -1,6 +1,11 @@
-mod basic;
+mod browse;
 mod commands;
-mod helper;
+mod interactive;
+mod option;
+mod positions;
+mod swap;
+mod tx;
+mod wallet;
 
 use std::path::PathBuf;
 
@@ -8,7 +13,7 @@ use clap::Parser;
 
 use crate::config::{Config, default_config_path};
 use crate::error::Error;
-pub use commands::{BasicCommand, Command, HelperCommand};
+pub use commands::{Command, OptionCommand, SwapCommand, TxCommand, WalletCommand};
 use signer::Signer;
 
 use crate::wallet::Wallet;
@@ -61,10 +66,12 @@ impl Cli {
         let config = self.load_config();
 
         match &self.command {
-            Command::Basic { command } => self.run_basic(config, command).await,
-            Command::Maker { .. } => todo!(),
-            Command::Taker { .. } => todo!(),
-            Command::Helper { command } => self.run_helper(config, command).await,
+            Command::Wallet { command } => self.run_wallet(config, command).await,
+            Command::Tx { command } => self.run_tx(config, command).await,
+            Command::Option { command } => self.run_option(config, command).await,
+            Command::Swap { command } => self.run_swap(config, command).await,
+            Command::Browse => self.run_browse(config).await,
+            Command::Positions => self.run_positions(config).await,
             Command::Config => {
                 println!("{config:#?}");
                 Ok(())
