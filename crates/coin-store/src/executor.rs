@@ -990,6 +990,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benchmark_many_assets_and_filters() {
+        use std::time::Instant; 
+
+        let path = "/tmp/benchmark_stress.db";
+        let _ = fs::remove_file(path);
+
+        let store = Store::create(path).await.unwrap();
+
+        let num_assets = 50;
+        let utxos_per_asset = 100; 
+        let coin_value = 10;       
+
+        let mut heavy_filters = Vec::new();
+
+        for i in 0..num_assets {
+
+            let mut asset_bytes = [0u8; 32];
+            asset_bytes[0] = (i % 255) as u8;
+            asset_bytes[1] = (i / 255) as u8;
+            let asset_id = AssetId::from_slice(&asset_bytes).unwrap();
+
+            for j in 0..utxos_per_asset {
+                let mut txid_bytes = [0u8; 32];
+                txid_bytes[0] = (i % 255) as u8;
+                txid_bytes[31] = (j % 255) as u8;
+                txid_bytes[15] = (j / 255) as u8; 
+                
+                let outpoint = OutPoint::new(Txid::from_byte_array(txid_bytes), j as u32);
+                
+                store.insert(
+                    outpoint,
+                    make_explicit_txout(asset_id, coin_value), 
+                    None,
+                ).await.unwrap();
+            }
+            heavy_filters.push(
+                UtxoFilter::new()
+                    .asset_id(asset_id)
+                    .required_value(950) 
+            );
+            heavy_filters.push(
+                UtxoFilter::new()
+                    .asset_id(asset_id)
+                    .required_value(1500)
+            );
+        }
+        
+        let start_current = Instant::now();
+        let _results = store.query_utxos(&heavy_filters).await.unwrap();
+        let duration_current = start_current.elapsed();
+        
+        println!("Current implementation took: {:.2?}", duration_current);
+
+        /*
+        let start_opt = Instant::now();
+        let _results_opt = store.optimized_query_utxos(&heavy_filters).await.unwrap();
+        let duration_opt = start_opt.elapsed();
+
+        
+        println!("Updated implementation took: {:.2?}", duration_opt);
+        */
+        
+        let _ = fs::remove_file(path);
+    }
+    
+    #[tokio::test]
     async fn test_add_contract() {
         let path = "/tmp/test_coin_store_add_contract.db";
         let _ = fs::remove_file(path);
