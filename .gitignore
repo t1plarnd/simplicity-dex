@@ -22,7 +22,6 @@ Cargo.lock
 # Disable logs that have obtained during run
 /logs
 *.log
-tmp/.env
 .env
 
 # RustRover

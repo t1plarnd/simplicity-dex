@@ -441,6 +441,8 @@ pub async fn format_asset_value_with_tag(
 mod tests {
     use super::*;
 
+    const ACCEPTABLE_THRESHOLD: i64 = 2;
+
     #[test]
     #[allow(clippy::cast_possible_wrap)]
     fn test_format_relative_time() {
@@ -463,5 +465,84 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
         assert_eq!(truncate_with_ellipsis("hello world", 8), "hello...");
         assert_eq!(truncate_with_ellipsis("abc", 3), "abc");
+    }
+
+    #[test]
+    fn test_parse_expiry_unix_timestamp() {
+        let ts = 1_704_067_200_i64;
+        assert_eq!(parse_expiry("1704067200").unwrap(), ts);
+    }
+
+    #[test]
+    fn test_parse_expiry_zero_timestamp() {
+        assert_eq!(parse_expiry("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_expiry_relative_days() {
+        let now = current_timestamp();
+        let result = parse_expiry("+30d").unwrap();
+        let expected = now + 30 * 24 * 3600;
+        assert!((result - expected).abs() < ACCEPTABLE_THRESHOLD);
+    }
+
+    #[test]
+    fn test_parse_expiry_relative_hours() {
+        let now = current_timestamp();
+        let result = parse_expiry("+2h").unwrap();
+        let expected = now + 2 * 3600;
+        assert!((result - expected).abs() < ACCEPTABLE_THRESHOLD);
+    }
+
+    #[test]
+    fn test_parse_expiry_relative_weeks() {
+        let now = current_timestamp();
+        let result = parse_expiry("+1w").unwrap();
+        let expected = now + 7 * 24 * 3600;
+        assert!((result - expected).abs() < ACCEPTABLE_THRESHOLD);
+    }
+
+    #[test]
+    fn test_parse_expiry_relative_minutes() {
+        let now = current_timestamp();
+        let result = parse_expiry("+45min").unwrap();
+        let expected = now + 45 * 60;
+        assert!((result - expected).abs() < ACCEPTABLE_THRESHOLD);
+    }
+
+    #[test]
+    fn test_parse_expiry_combined_duration() {
+        let now = current_timestamp();
+        let result = parse_expiry("+1d2h").unwrap();
+        let expected = now + 24 * 3600 + 2 * 3600;
+        assert!((result - expected).abs() < ACCEPTABLE_THRESHOLD);
+    }
+
+    #[test]
+    fn test_parse_expiry_invalid_format() {
+        let result = parse_expiry("invalid");
+        assert!(result.is_err());
+        match result {
+            Err(Error::Config(msg)) => {
+                assert!(msg.contains("Invalid expiry format"));
+            }
+            _ => panic!("Expected Config error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_expiry_invalid_relative_duration() {
+        let result = parse_expiry("+invalid_duration");
+        assert!(result.is_err());
+        match result {
+            Err(Error::HumantimeParse { .. }) => {}
+            _ => panic!("Expected HumantimeParse error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_expiry_negative_relative_duration() {
+        let result = parse_expiry("-30d");
+        assert!(result.is_err());
     }
 }
