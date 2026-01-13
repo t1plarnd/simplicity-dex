@@ -1,3 +1,4 @@
+use crate::cli::tables::{UtxoDisplay, display_utxo_table};
 use crate::cli::{Cli, WalletCommand};
 use crate::config::Config;
 use crate::error::Error;
@@ -63,24 +64,25 @@ impl Cli {
                 let results = wallet.store().query_utxos(&[filter]).await?;
 
                 if let Some(coin_store::UtxoQueryResult::Found(entries, _)) = results.into_iter().next() {
-                    for entry in &entries {
-                        let (Some(asset), Some(value)) = (entry.asset(), entry.value()) else {
-                            println!(
-                                "{:<76} | {:<64} | {:<25}",
-                                entry.outpoint(),
-                                "Confidential",
-                                "Confidential"
-                            );
+                    let displays: Vec<UtxoDisplay> = entries
+                        .iter()
+                        .map(|entry| {
+                            let (asset, value) = match (entry.asset(), entry.value()) {
+                                (Some(a), Some(v)) => (a.to_string(), v.to_string()),
+                                _ => ("Confidential".to_string(), "Confidential".to_string()),
+                            };
+                            UtxoDisplay {
+                                outpoint: entry.outpoint().to_string(),
+                                asset,
+                                value,
+                            }
+                        })
+                        .collect();
 
-                            continue;
-                        };
-
-                        println!("{:<76} | {:<64} | {:<25}", entry.outpoint(), asset, value);
-                    }
-
+                    display_utxo_table(&displays);
                     println!("Total: {} UTXOs", entries.len());
                 } else {
-                    println!("No UTXOs found");
+                    display_utxo_table(&[]);
                 }
                 Ok(())
             }

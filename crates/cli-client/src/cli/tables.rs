@@ -1,5 +1,6 @@
 use crate::cli::interactive::{SwapDisplay, TokenDisplay};
 use crate::cli::positions::{CollateralDisplay, UserTokenDisplay};
+use crate::cli::swap::{ActiveSwapDisplay, CancellableSwapDisplay, WithdrawableSwapDisplay};
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Attribute, Cell, Table};
 
@@ -81,6 +82,78 @@ impl TableData for UserTokenDisplay {
     }
 }
 
+impl TableData for ActiveSwapDisplay {
+    fn get_header() -> Vec<String> {
+        vec!["#", "Offering", "Price", "Wants", "Expires", "Seller"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+    fn to_row(&self) -> Vec<String> {
+        vec![
+            self.index.to_string(),
+            self.offering.clone(),
+            self.price.clone(),
+            self.wants.clone(),
+            self.expires.clone(),
+            self.seller.clone(),
+        ]
+    }
+}
+
+impl TableData for CancellableSwapDisplay {
+    fn get_header() -> Vec<String> {
+        vec!["#", "Collateral", "Asset", "Expired", "Contract"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+    fn to_row(&self) -> Vec<String> {
+        vec![
+            self.index.to_string(),
+            self.collateral.clone(),
+            self.asset.clone(),
+            self.expired.clone(),
+            self.contract.clone(),
+        ]
+    }
+}
+
+impl TableData for WithdrawableSwapDisplay {
+    fn get_header() -> Vec<String> {
+        vec!["#", "Settlement Available", "Asset", "Contract"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+    fn to_row(&self) -> Vec<String> {
+        vec![
+            self.index.to_string(),
+            self.settlement.clone(),
+            self.asset.clone(),
+            self.contract.clone(),
+        ]
+    }
+}
+
+pub struct UtxoDisplay {
+    pub outpoint: String,
+    pub asset: String,
+    pub value: String,
+}
+
+impl TableData for UtxoDisplay {
+    fn get_header() -> Vec<String> {
+        vec!["Outpoint", "Asset", "Value"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+    fn to_row(&self) -> Vec<String> {
+        vec![self.outpoint.clone(), self.asset.clone(), self.value.clone()]
+    }
+}
+
 fn render_table<T: TableData>(items: &[T], empty_msg: &str) {
     if items.is_empty() {
         println!("  ({empty_msg})");
@@ -120,4 +193,20 @@ pub fn display_collateral_table(displays: &[CollateralDisplay]) {
 
 pub fn display_user_token_table(displays: &[UserTokenDisplay]) {
     render_table(displays, "No option/grantor tokens found");
+}
+
+pub fn display_active_swaps_table(active_swaps: &[ActiveSwapDisplay]) {
+    render_table(active_swaps, "No swaps found");
+}
+
+pub fn display_cancellable_swaps_table(cancellable_swaps: &[CancellableSwapDisplay]) {
+    render_table(cancellable_swaps, "No cancellable swaps found");
+}
+
+pub fn display_withdrawable_swaps_table(withdrawable_swaps: &[WithdrawableSwapDisplay]) {
+    render_table(withdrawable_swaps, "No withdrawable swaps found");
+}
+
+pub fn display_utxo_table(utxos: &[UtxoDisplay]) {
+    render_table(utxos, "No UTXOs found");
 }
