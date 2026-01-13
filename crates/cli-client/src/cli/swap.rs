@@ -26,7 +26,7 @@ use simplicityhl::elements::pset::serialize::Serialize;
 use simplicityhl::simplicity::hex::DisplayHex;
 use simplicityhl_core::{LIQUID_TESTNET_BITCOIN_ASSET, LIQUID_TESTNET_GENESIS};
 
-pub(crate) struct LocalSwapData {
+pub struct LocalSwapData {
     pub(crate) swap_args: SwapWithChangeArguments,
     pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
     pub(crate) metadata: ContractMetadata,
@@ -34,20 +34,20 @@ pub(crate) struct LocalSwapData {
     pub(crate) current_value: u64,
 }
 
-pub(crate) struct LocalCancellableSwap {
+pub struct LocalCancellableSwap {
     pub(crate) swap_args: SwapWithChangeArguments,
     pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
     pub(crate) metadata: ContractMetadata,
 }
 
-pub(crate) struct LocalWithdrawableSwap {
+pub struct LocalWithdrawableSwap {
     pub(crate) swap_args: SwapWithChangeArguments,
     pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
     pub(crate) metadata: ContractMetadata,
     pub(crate) settlement_amount: u64,
 }
 
-pub(crate) struct ActiveSwapDisplay {
+pub struct ActiveSwapDisplay {
     pub(crate) index: usize,
     pub(crate) offering: String,
     pub(crate) price: String,
@@ -56,7 +56,7 @@ pub(crate) struct ActiveSwapDisplay {
     pub(crate) seller: String,
 }
 
-pub(crate) struct CancellableSwapDisplay {
+pub struct CancellableSwapDisplay {
     pub(crate) index: usize,
     pub(crate) collateral: String,
     pub(crate) asset: String,
@@ -64,7 +64,7 @@ pub(crate) struct CancellableSwapDisplay {
     pub(crate) contract: String,
 }
 
-pub(crate) struct WithdrawableSwapDisplay {
+pub struct WithdrawableSwapDisplay {
     pub(crate) index: usize,
     pub(crate) settlement: String,
     pub(crate) asset: String,

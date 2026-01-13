@@ -136,6 +136,24 @@ impl TableData for WithdrawableSwapDisplay {
     }
 }
 
+pub struct UtxoDisplay {
+    pub outpoint: String,
+    pub asset: String,
+    pub value: String,
+}
+
+impl TableData for UtxoDisplay {
+    fn get_header() -> Vec<String> {
+        vec!["Outpoint", "Asset", "Value"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+    fn to_row(&self) -> Vec<String> {
+        vec![self.outpoint.clone(), self.asset.clone(), self.value.clone()]
+    }
+}
+
 fn render_table<T: TableData>(items: &[T], empty_msg: &str) {
     if items.is_empty() {
         println!("  ({empty_msg})");
@@ -187,4 +205,8 @@ pub fn display_cancellable_swaps_table(cancellable_swaps: &[CancellableSwapDispl
 
 pub fn display_withdrawable_swaps_table(withdrawable_swaps: &[WithdrawableSwapDisplay]) {
     render_table(withdrawable_swaps, "No withdrawable swaps found");
+}
+
+pub fn display_utxo_table(utxos: &[UtxoDisplay]) {
+    render_table(utxos, "No UTXOs found");
 }
