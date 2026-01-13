@@ -16,6 +16,8 @@ categories.workspace = true
 simplicityhl = { workspace = true }
 contracts = { workspace = true }
 
+simplicityhl-core = { workspace = true }
+
 sha2 = { version = "0.10.9" }
 
 futures = { version = "0.3" }
@@ -34,5 +36,17 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 tokio = { version = "1", features = ["full"] }
 
 [[bench]]
-name = "benchmark"   
+name = "default"   
+harness = false
+
+[[bench]]
+name = "contracts"   
+harness = false
+
+[[bench]]
+name = "entropy"   
+harness = false
+
+[[bench]]
+name = "token"   
 harness = false
