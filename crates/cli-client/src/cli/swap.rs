@@ -1,6 +1,10 @@
 use crate::cli::interactive::{
-    SWAP_COLLATERAL_TAG, current_timestamp, extract_entries_from_result, format_relative_time,
+    SWAP_COLLATERAL_TAG, current_timestamp, extract_entries_from_result, format_relative_time, format_settlement_asset,
     get_grantor_tokens_from_wallet, parse_expiry, prompt_amount, select_enriched_token_interactive,
+    truncate_with_ellipsis,
+};
+use crate::cli::tables::{
+    display_active_swaps_table, display_cancellable_swaps_table, display_withdrawable_swaps_table,
 };
 use crate::cli::{Cli, SwapCommand};
 use crate::config::Config;
@@ -21,6 +25,51 @@ use options_relay::{ActionCompletedEvent, ActionType, SwapCreatedEvent};
 use simplicityhl::elements::pset::serialize::Serialize;
 use simplicityhl::simplicity::hex::DisplayHex;
 use simplicityhl_core::{LIQUID_TESTNET_BITCOIN_ASSET, LIQUID_TESTNET_GENESIS};
+
+pub(crate) struct LocalSwapData {
+    pub(crate) swap_args: SwapWithChangeArguments,
+    pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
+    pub(crate) metadata: ContractMetadata,
+    pub(crate) current_outpoint: simplicityhl::elements::OutPoint,
+    pub(crate) current_value: u64,
+}
+
+pub(crate) struct LocalCancellableSwap {
+    pub(crate) swap_args: SwapWithChangeArguments,
+    pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
+    pub(crate) metadata: ContractMetadata,
+}
+
+pub(crate) struct LocalWithdrawableSwap {
+    pub(crate) swap_args: SwapWithChangeArguments,
+    pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
+    pub(crate) metadata: ContractMetadata,
+    pub(crate) settlement_amount: u64,
+}
+
+pub(crate) struct ActiveSwapDisplay {
+    pub(crate) index: usize,
+    pub(crate) offering: String,
+    pub(crate) price: String,
+    pub(crate) wants: String,
+    pub(crate) expires: String,
+    pub(crate) seller: String,
+}
+
+pub(crate) struct CancellableSwapDisplay {
+    pub(crate) index: usize,
+    pub(crate) collateral: String,
+    pub(crate) asset: String,
+    pub(crate) expired: String,
+    pub(crate) contract: String,
+}
+
+pub(crate) struct WithdrawableSwapDisplay {
+    pub(crate) index: usize,
+    pub(crate) settlement: String,
+    pub(crate) asset: String,
+    pub(crate) contract: String,
+}
 
 impl Cli {
     #[allow(clippy::too_many_lines)]
@@ -197,14 +246,6 @@ impl Cli {
                 fee,
                 broadcast,
             } => {
-                struct LocalSwapData {
-                    swap_args: SwapWithChangeArguments,
-                    taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
-                    metadata: ContractMetadata,
-                    current_outpoint: simplicityhl::elements::OutPoint,
-                    current_value: u64,
-                }
-
                 println!("Taking swap offer...");
 
                 let swap_contracts =
@@ -280,24 +321,8 @@ impl Cli {
                         ));
                     }
 
-                    println!(
-                        "  {:<3} | {:<12} | {:<10} | {:<14} | {:<15} | Seller",
-                        "#", "Offering", "Price", "Wants", "Expires"
-                    );
-                    println!("{}", "-".repeat(90));
-                    for (idx, swap) in active_swaps.iter().enumerate() {
-                        let seller = swap.metadata.nostr_author.as_deref().unwrap_or("unknown");
-                        let price = swap.swap_args.collateral_per_contract();
-                        println!(
-                            "  {:<3} | {:<12} | {:<10} | {:<14} | {:<15} | {}",
-                            idx + 1,
-                            swap.current_value,
-                            price,
-                            crate::cli::interactive::format_settlement_asset(&swap.swap_args.get_settlement_asset_id()),
-                            format_relative_time(i64::from(swap.swap_args.expiry_time())),
-                            crate::cli::interactive::truncate_with_ellipsis(seller, 12)
-                        );
-                    }
+                    let active_swap_displays = build_active_swaps_displays(&active_swaps);
+                    display_active_swaps_table(&active_swap_displays);
                     println!();
 
                     let selection =
@@ -500,12 +525,6 @@ impl Cli {
                 fee,
                 broadcast,
             } => {
-                struct LocalCancellableSwap {
-                    swap_args: SwapWithChangeArguments,
-                    taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
-                    metadata: ContractMetadata,
-                }
-
                 println!("Cancelling swap offer (reclaiming collateral after expiry)...");
 
                 let swap_contracts =
@@ -578,28 +597,8 @@ impl Cli {
                     ));
                 }
 
-                println!(
-                    "  {:<3} | {:<12} | {:<14} | {:<20} | Contract",
-                    "#", "Collateral", "Asset", "Expired"
-                );
-                println!("{}", "-".repeat(80));
-                for (idx, cs) in cancellable_swaps.iter().enumerate() {
-                    let asset_display =
-                        crate::cli::interactive::format_settlement_asset(&cs.swap_args.get_collateral_asset_id());
-                    let expiry_time = cs.swap_args.expiry_time();
-                    let contract_short = cs.metadata.nostr_event_id.as_ref().map_or_else(
-                        || crate::cli::interactive::truncate_with_ellipsis(&cs.taproot_pubkey_gen.to_string(), 16),
-                        |id| crate::cli::interactive::truncate_with_ellipsis(id, 16),
-                    );
-                    println!(
-                        "  {:<3} | {:<12} | {:<14} | {:<20} | {}",
-                        idx + 1,
-                        "available",
-                        asset_display,
-                        format!("expired ({})", expiry_time),
-                        contract_short
-                    );
-                }
+                let cancellable_swap_displays = build_cancellable_swaps_displays(&cancellable_swaps);
+                display_cancellable_swaps_table(&cancellable_swap_displays);
                 println!();
 
                 let selected = if let Some(event_id_str) = swap_event {
@@ -800,13 +799,6 @@ impl Cli {
                 fee,
                 broadcast,
             } => {
-                struct LocalWithdrawableSwap {
-                    swap_args: SwapWithChangeArguments,
-                    taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
-                    metadata: ContractMetadata,
-                    settlement_amount: u64,
-                }
-
                 println!("Withdrawing settlement from swap (claiming payment after swap was taken)...");
 
                 let swap_contracts =
@@ -879,26 +871,8 @@ impl Cli {
                     ));
                 }
 
-                println!(
-                    "  {:<3} | {:<20} | {:<14} | Contract",
-                    "#", "Settlement Available", "Asset"
-                );
-                println!("{}", "-".repeat(70));
-                for (idx, ws) in withdrawable_swaps.iter().enumerate() {
-                    let asset_display =
-                        crate::cli::interactive::format_settlement_asset(&ws.swap_args.get_settlement_asset_id());
-                    let contract_short = ws.metadata.nostr_event_id.as_ref().map_or_else(
-                        || crate::cli::interactive::truncate_with_ellipsis(&ws.taproot_pubkey_gen.to_string(), 16),
-                        |id| crate::cli::interactive::truncate_with_ellipsis(id, 16),
-                    );
-                    println!(
-                        "  {:<3} | {:<20} | {:<14} | {}",
-                        idx + 1,
-                        ws.settlement_amount,
-                        asset_display,
-                        contract_short
-                    );
-                }
+                let withdrawable_swap_displays = build_withdrawable_swaps_displays(&withdrawable_swaps);
+                display_withdrawable_swaps_table(&withdrawable_swap_displays);
                 println!();
 
                 let selected = if let Some(event_id_str) = swap_event {
@@ -1094,4 +1068,63 @@ impl Cli {
             }
         }
     }
+}
+
+fn build_active_swaps_displays(active_swaps: &[LocalSwapData]) -> Vec<ActiveSwapDisplay> {
+    active_swaps
+        .iter()
+        .enumerate()
+        .map(|(idx, swap)| {
+            let seller = swap.metadata.nostr_author.as_deref().unwrap_or("unknown");
+            let price = swap.swap_args.collateral_per_contract();
+            ActiveSwapDisplay {
+                index: idx + 1,
+                offering: swap.current_value.to_string(),
+                price: price.to_string(),
+                wants: format_settlement_asset(&swap.swap_args.get_settlement_asset_id()),
+                expires: format_relative_time(i64::from(swap.swap_args.expiry_time())),
+                seller: truncate_with_ellipsis(seller, 12),
+            }
+        })
+        .collect()
+}
+
+fn build_cancellable_swaps_displays(cancellable_swaps: &[LocalCancellableSwap]) -> Vec<CancellableSwapDisplay> {
+    cancellable_swaps
+        .iter()
+        .enumerate()
+        .map(|(idx, cs)| {
+            let expiry_time = cs.swap_args.expiry_time();
+            let contract_short = cs.metadata.nostr_event_id.as_ref().map_or_else(
+                || truncate_with_ellipsis(&cs.taproot_pubkey_gen.to_string(), 16),
+                |id| truncate_with_ellipsis(id, 16),
+            );
+            CancellableSwapDisplay {
+                index: idx + 1,
+                collateral: "available".to_string(),
+                asset: format_settlement_asset(&cs.swap_args.get_collateral_asset_id()),
+                expired: format!("expired ({expiry_time})"),
+                contract: contract_short,
+            }
+        })
+        .collect()
+}
+
+fn build_withdrawable_swaps_displays(withdrawable_swaps: &[LocalWithdrawableSwap]) -> Vec<WithdrawableSwapDisplay> {
+    withdrawable_swaps
+        .iter()
+        .enumerate()
+        .map(|(idx, ws)| {
+            let contract_short = ws.metadata.nostr_event_id.as_ref().map_or_else(
+                || truncate_with_ellipsis(&ws.taproot_pubkey_gen.to_string(), 16),
+                |id| truncate_with_ellipsis(id, 16),
+            );
+            WithdrawableSwapDisplay {
+                index: idx + 1,
+                settlement: ws.settlement_amount.to_string(),
+                asset: format_settlement_asset(&ws.swap_args.get_settlement_asset_id()),
+                contract: contract_short,
+            }
+        })
+        .collect()
 }
