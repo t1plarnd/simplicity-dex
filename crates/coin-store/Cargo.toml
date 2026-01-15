@@ -40,11 +40,11 @@ name = "default"
 harness = false
 
 [[bench]]
-name = "contracts"   
+name = "entropy"   
 harness = false
 
 [[bench]]
-name = "entropy"   
+name = "contracts"   
 harness = false
 
 [[bench]]
