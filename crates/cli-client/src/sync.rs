@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use coin_store::{Store, UtxoStore};
-use options_relay::{ActionType, OptionCreatedEvent, SwapCreatedEvent};
+use options_relay::{ActionType, OptionCreatedEvent, OptionOfferCreatedEvent};
 use simplicityhl_core::derive_public_blinder_key;
 
-use crate::cli::{GRANTOR_TOKEN_TAG, OPTION_TOKEN_TAG, SWAP_COLLATERAL_TAG};
+use crate::cli::{GRANTOR_TOKEN_TAG, OPTION_OFFER_COLLATERAL_TAG, OPTION_TOKEN_TAG};
 use crate::error::Error;
 use crate::explorer::fetch_transaction;
 use crate::metadata::ContractMetadata;
@@ -80,9 +80,9 @@ pub async fn sync_utxo_with_public_blinder(
     Ok(())
 }
 
-pub async fn sync_swap_event(
+pub async fn sync_option_offer_event(
     store: &Store,
-    event: &SwapCreatedEvent,
+    event: &OptionOfferCreatedEvent,
     source: &str,
     arguments: simplicityhl::Arguments,
     parent_option_event_id: Option<String>,
@@ -91,7 +91,7 @@ pub async fn sync_swap_event(
     let created_at = event.created_at.as_secs() as i64;
 
     let history = vec![HistoryEntry::with_txid_and_nostr(
-        ActionType::SwapCreated.as_str(),
+        ActionType::OptionOfferCreated.as_str(),
         &event.utxo.txid.to_string(),
         &event.event_id.to_hex(),
         created_at,
@@ -129,13 +129,13 @@ pub async fn sync_swap_event(
         )
         .await?;
 
-    let collateral_asset = event.swap_args.get_collateral_asset_id();
+    let collateral_asset = event.option_offer_args.get_collateral_asset_id();
     store
-        .insert_contract_token(&event.taproot_pubkey_gen, collateral_asset, SWAP_COLLATERAL_TAG)
+        .insert_contract_token(&event.taproot_pubkey_gen, collateral_asset, OPTION_OFFER_COLLATERAL_TAG)
         .await?;
 
     if let Err(e) = sync_utxo_with_public_blinder(store, event.utxo).await {
-        tracing::debug!("Could not sync swap UTXO {}: {} (soft failure)", event.utxo, e);
+        tracing::debug!("Could not sync option offer UTXO {}: {} (soft failure)", event.utxo, e);
     }
 
     Ok(())

@@ -2,8 +2,8 @@ mod browse;
 mod commands;
 mod interactive;
 mod option;
+mod option_offer;
 mod positions;
-mod swap;
 mod sync;
 mod tables;
 mod tx;
@@ -21,8 +21,9 @@ use std::path::PathBuf;
 
 use signer::Signer;
 
-pub use commands::{Command, OptionCommand, SwapCommand, SyncCommand, TxCommand, WalletCommand};
-pub use interactive::{GRANTOR_TOKEN_TAG, OPTION_TOKEN_TAG, SWAP_COLLATERAL_TAG};
+pub use commands::{Command, OptionCommand, OptionOfferCommand, SyncCommand, TxCommand, WalletCommand};
+pub use interactive::{GRANTOR_TOKEN_TAG, OPTION_TOKEN_TAG};
+pub use option_offer::OPTION_OFFER_COLLATERAL_TAG;
 
 #[derive(Debug, Parser)]
 #[command(name = "simplicity-dex")]
@@ -97,7 +98,7 @@ impl Cli {
             Command::Wallet { command } => self.run_wallet(config, command).await,
             Command::Tx { command } => self.run_tx(config, command).await,
             Command::Option { command } => Box::pin(self.run_option(config, command)).await,
-            Command::Swap { command } => Box::pin(self.run_swap(config, command)).await,
+            Command::OptionOffer { command } => Box::pin(self.run_option_offer(config, command)).await,
             Command::Browse => self.run_browse(config).await,
             Command::Positions => self.run_positions(config).await,
             Command::Sync { command } => self.run_sync(config, command).await,

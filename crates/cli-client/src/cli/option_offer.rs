@@ -1,12 +1,12 @@
 use crate::cli::interactive::{
-    SWAP_COLLATERAL_TAG, current_timestamp, extract_entries_from_result, format_relative_time, format_settlement_asset,
-    get_grantor_tokens_from_wallet, parse_expiry, prompt_amount, select_enriched_token_interactive,
-    truncate_with_ellipsis,
+    current_timestamp, extract_entries_from_result, format_relative_time, format_settlement_asset, get_wallet_assets,
+    parse_expiry, prompt_amount, select_asset_interactive, truncate_with_ellipsis,
 };
 use crate::cli::tables::{
-    display_active_swaps_table, display_cancellable_swaps_table, display_withdrawable_swaps_table,
+    display_active_option_offers_table, display_cancellable_option_offers_table,
+    display_withdrawable_option_offers_table,
 };
-use crate::cli::{Cli, SwapCommand};
+use crate::cli::{Cli, OptionOfferCommand};
 use crate::config::Config;
 use crate::error::Error;
 use crate::fee::{PLACEHOLDER_FEE, estimate_fee_signed};
@@ -16,38 +16,41 @@ use crate::signing::sign_p2pk_inputs;
 use std::collections::HashMap;
 
 use coin_store::{UtxoFilter, UtxoQueryResult, UtxoStore};
-use contracts::options::OPTION_SOURCE;
-use contracts::swap_with_change::{
-    SWAP_WITH_CHANGE_SOURCE, SwapWithChangeArguments, finalize_swap_with_change_transaction,
-    get_swap_with_change_program,
+use contracts::option_offer::{
+    OPTION_OFFER_SOURCE, OptionOfferArguments, finalize_option_offer_transaction, get_option_offer_program,
 };
-use options_relay::{ActionCompletedEvent, ActionType, SwapCreatedEvent};
+use options_relay::{ActionCompletedEvent, ActionType, OptionOfferCreatedEvent};
 use simplicityhl::elements::pset::serialize::Serialize;
 use simplicityhl::simplicity::hex::DisplayHex;
+use simplicityhl::tracker::TrackerLogLevel;
 use simplicityhl_core::{LIQUID_TESTNET_BITCOIN_ASSET, LIQUID_TESTNET_GENESIS};
 
-pub struct LocalSwapData {
-    pub(crate) swap_args: SwapWithChangeArguments,
+pub const OPTION_OFFER_COLLATERAL_TAG: &str = "option_offer_collateral";
+
+pub struct LocalOptionOfferData {
+    pub(crate) option_offer_args: OptionOfferArguments,
     pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
     pub(crate) metadata: ContractMetadata,
     pub(crate) current_outpoint: simplicityhl::elements::OutPoint,
     pub(crate) current_value: u64,
 }
 
-pub struct LocalCancellableSwap {
-    pub(crate) swap_args: SwapWithChangeArguments,
+pub struct LocalCancellableOptionOffer {
+    pub(crate) option_offer_args: OptionOfferArguments,
     pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
     pub(crate) metadata: ContractMetadata,
+    pub(crate) collateral_amount: u64,
+    pub(crate) premium_amount: u64,
 }
 
-pub struct LocalWithdrawableSwap {
-    pub(crate) swap_args: SwapWithChangeArguments,
+pub struct LocalWithdrawableOptionOffer {
+    pub(crate) option_offer_args: OptionOfferArguments,
     pub(crate) taproot_pubkey_gen: contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen,
     pub(crate) metadata: ContractMetadata,
     pub(crate) settlement_amount: u64,
 }
 
-pub struct ActiveSwapDisplay {
+pub struct ActiveOptionOfferDisplay {
     pub(crate) index: usize,
     pub(crate) offering: String,
     pub(crate) price: String,
@@ -56,15 +59,16 @@ pub struct ActiveSwapDisplay {
     pub(crate) seller: String,
 }
 
-pub struct CancellableSwapDisplay {
+pub struct CancellableOptionOfferDisplay {
     pub(crate) index: usize,
     pub(crate) collateral: String,
+    pub(crate) premium: String,
     pub(crate) asset: String,
     pub(crate) expired: String,
     pub(crate) contract: String,
 }
 
-pub struct WithdrawableSwapDisplay {
+pub struct WithdrawableOptionOfferDisplay {
     pub(crate) index: usize,
     pub(crate) settlement: String,
     pub(crate) asset: String,
@@ -73,117 +77,207 @@ pub struct WithdrawableSwapDisplay {
 
 impl Cli {
     #[allow(clippy::too_many_lines)]
-    pub(crate) async fn run_swap(&self, config: Config, command: &SwapCommand) -> Result<(), Error> {
+    pub(crate) async fn run_option_offer(&self, config: Config, command: &OptionOfferCommand) -> Result<(), Error> {
         let wallet = self.get_wallet(&config).await?;
 
         match command {
-            SwapCommand::Create {
-                grantor_token,
+            OptionOfferCommand::Create {
+                collateral_asset,
+                collateral_amount,
                 premium_asset,
                 premium_amount,
+                settlement_asset,
+                settlement_amount,
                 expiry,
                 fee,
                 broadcast,
             } => {
-                println!("Creating swap offer...");
+                println!("Creating option offer...");
 
                 let user_script_pubkey = wallet.signer().p2pk_address(config.address_params())?.script_pubkey();
 
-                let grantor_outpoint = if let Some(outpoint) = grantor_token {
-                    *outpoint
+                let wallet_assets = get_wallet_assets(&wallet, &user_script_pubkey).await?;
+
+                let collateral_asset_id = if let Some(asset) = collateral_asset {
+                    *asset
                 } else {
-                    let grantor_entries =
-                        get_grantor_tokens_from_wallet(&wallet, OPTION_SOURCE, &user_script_pubkey).await?;
-                    if grantor_entries.is_empty() {
-                        return Err(Error::Config(
-                            "No grantor tokens found in wallet. Create an option first or import grantor tokens."
-                                .to_string(),
-                        ));
+                    let selected = select_asset_interactive(&wallet_assets, "Select collateral asset", false)?;
+                    selected.asset_id
+                };
+
+                let collateral_amt = if let Some(amt) = collateral_amount {
+                    *amt
+                } else {
+                    prompt_amount("Enter collateral amount").map_err(Error::Io)?
+                };
+
+                if collateral_amt == 0 {
+                    return Err(Error::Config("Collateral amount must be greater than 0".to_string()));
+                }
+
+                let premium_asset_id = if let Some(asset) = premium_asset {
+                    *asset
+                } else {
+                    let selected = select_asset_interactive(&wallet_assets, "Select premium asset", true)?;
+                    selected.asset_id
+                };
+
+                let total_premium = if let Some(amt) = premium_amount {
+                    *amt
+                } else {
+                    prompt_amount("Enter total premium amount").map_err(Error::Io)?
+                };
+
+                let premium_per_collateral = if total_premium == 0 {
+                    0
+                } else {
+                    if total_premium % collateral_amt != 0 {
+                        return Err(Error::Config(format!(
+                            "Premium amount ({total_premium}) must be evenly divisible by collateral amount ({collateral_amt}). \
+                             Remainder: {}",
+                            total_premium % collateral_amt
+                        )));
                     }
-                    let selected =
-                        select_enriched_token_interactive(&grantor_entries, "Select grantor token for swap")?;
-                    *selected.entry.outpoint()
+                    total_premium / collateral_amt
+                };
+
+                let settlement_asset_id = if let Some(asset) = settlement_asset {
+                    *asset
+                } else {
+                    let selected = select_asset_interactive(&wallet_assets, "Select settlement asset", true)?;
+                    selected.asset_id
+                };
+
+                let settlement_amt = if let Some(amt) = settlement_amount {
+                    *amt
+                } else {
+                    prompt_amount("Enter total settlement amount expected").map_err(Error::Io)?
+                };
+
+                let collateral_per_contract = if settlement_amt == 0 {
+                    return Err(Error::Config("Settlement amount must be greater than 0".to_string()));
+                } else {
+                    if settlement_amt % collateral_amt != 0 {
+                        return Err(Error::Config(format!(
+                            "Settlement amount ({settlement_amt}) must be evenly divisible by collateral amount ({collateral_amt}). \
+                             Remainder: {}",
+                            settlement_amt % collateral_amt
+                        )));
+                    }
+                    settlement_amt / collateral_amt
                 };
 
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let swap_expiry: u32 = match expiry {
-                    Some(exp_str) => parse_expiry(exp_str)? as u32,
-                    None => (current_timestamp() + 86400 * 30) as u32,
-                };
+                let offer_expiry: u32 = parse_expiry(expiry)? as u32;
 
-                let premium_asset_id = premium_asset.unwrap_or(*LIQUID_TESTNET_BITCOIN_ASSET);
+                println!();
+                println!(
+                    "  Collateral: {collateral_amt} of {}",
+                    format_settlement_asset(&collateral_asset_id)
+                );
+                println!(
+                    "  Premium: {total_premium} of {} (rate: {premium_per_collateral} per collateral)",
+                    format_settlement_asset(&premium_asset_id)
+                );
+                println!(
+                    "  Settlement: {} of {} (rate: {collateral_per_contract} per collateral)",
+                    settlement_amt,
+                    format_settlement_asset(&settlement_asset_id)
+                );
+                println!("  Expiry: {}", format_relative_time(i64::from(offer_expiry)));
 
-                println!("  Grantor token: {grantor_outpoint}");
-                println!("  Premium: {premium_amount} of {premium_asset_id}");
-                println!("  Expiry: {}", format_relative_time(i64::from(swap_expiry)));
-
-                let grantor_txout = cli_helper::explorer::fetch_utxo(grantor_outpoint).await?;
-
-                let collateral_asset = grantor_txout
-                    .asset
-                    .explicit()
-                    .ok_or_else(|| Error::Config("Grantor token has confidential asset".to_string()))?;
-
-                let collateral_value = grantor_txout
-                    .value
-                    .explicit()
-                    .ok_or_else(|| Error::Config("Grantor token has confidential value".to_string()))?;
-
-                let swap_args = SwapWithChangeArguments::new(
-                    collateral_asset,
+                let option_offer_args = OptionOfferArguments::new(
+                    collateral_asset_id,
                     premium_asset_id,
-                    *premium_amount,
-                    swap_expiry,
+                    settlement_asset_id,
+                    collateral_per_contract,
+                    premium_per_collateral,
+                    offer_expiry,
                     wallet.signer().public_key().serialize(),
                 );
+
+                let collateral_filter = UtxoFilter::new()
+                    .asset_id(collateral_asset_id)
+                    .script_pubkey(user_script_pubkey.clone())
+                    .required_value(collateral_amt);
+
+                let premium_filter = UtxoFilter::new()
+                    .asset_id(premium_asset_id)
+                    .script_pubkey(user_script_pubkey.clone())
+                    .required_value(total_premium);
 
                 let fee_filter = UtxoFilter::new()
                     .asset_id(*LIQUID_TESTNET_BITCOIN_ASSET)
                     .script_pubkey(user_script_pubkey.clone())
                     .required_value(fee.unwrap_or(PLACEHOLDER_FEE));
 
-                let results = <_ as UtxoStore>::query_utxos(wallet.store(), &[fee_filter]).await?;
-                let fee_entries = extract_entries_from_result(&results[0]);
+                let results =
+                    <_ as UtxoStore>::query_utxos(wallet.store(), &[collateral_filter, premium_filter, fee_filter])
+                        .await?;
 
+                let collateral_entries = extract_entries_from_result(&results[0]);
+                let premium_entries = extract_entries_from_result(&results[1]);
+                let fee_entries = extract_entries_from_result(&results[2]);
+
+                if collateral_entries.is_empty() {
+                    return Err(Error::Config(format!(
+                        "No collateral UTXOs found for asset {}",
+                        format_settlement_asset(&collateral_asset_id)
+                    )));
+                }
+                if premium_entries.is_empty() {
+                    return Err(Error::Config(format!(
+                        "No premium UTXOs found for asset {}. Need {total_premium}",
+                        format_settlement_asset(&premium_asset_id)
+                    )));
+                }
                 if fee_entries.is_empty() {
                     return Err(Error::Config("No LBTC UTXOs found for fee".to_string()));
                 }
 
+                let collateral_utxo = &collateral_entries[0];
+                let premium_utxo = &premium_entries[0];
                 let fee_utxo = &fee_entries[0];
 
-                let collateral_input = (grantor_outpoint, grantor_txout.clone());
+                let collateral_input = (*collateral_utxo.outpoint(), collateral_utxo.txout().clone());
+                let premium_input = (*premium_utxo.outpoint(), premium_utxo.txout().clone());
                 let fee_input = (*fee_utxo.outpoint(), fee_utxo.txout().clone());
 
                 let actual_fee = estimate_fee_signed(
                     fee.as_ref(),
                     config.get_fee_rate(),
                     |f| {
-                        let (pst, _) = contracts::sdk::build_swap_deposit(
+                        let (pst, _) = contracts::sdk::build_option_offer_deposit(
                             collateral_input.clone(),
+                            premium_input.clone(),
                             fee_input.clone(),
-                            collateral_value,
+                            collateral_amt,
                             f,
-                            &swap_args,
+                            &option_offer_args,
                             config.address_params(),
                         )?;
-                        Ok((pst, vec![collateral_input.1.clone(), fee_input.1.clone()]))
+                        Ok((
+                            pst,
+                            vec![collateral_input.1.clone(), premium_input.1.clone(), fee_input.1.clone()],
+                        ))
                     },
                     |tx, utxos| sign_p2pk_inputs(tx, utxos, &wallet, config.address_params(), 0),
                 )?;
 
                 println!("  Fee: {actual_fee} sats");
 
-                let (pst, taproot_pubkey_gen) = contracts::sdk::build_swap_deposit(
+                let (pst, taproot_pubkey_gen) = contracts::sdk::build_option_offer_deposit(
                     collateral_input.clone(),
+                    premium_input.clone(),
                     fee_input.clone(),
-                    collateral_value,
+                    collateral_amt,
                     actual_fee,
-                    &swap_args,
+                    &option_offer_args,
                     config.address_params(),
                 )?;
 
                 let tx = pst.extract_tx()?;
-                let utxos = vec![collateral_input.1.clone(), fee_input.1];
+                let utxos = vec![collateral_input.1.clone(), premium_input.1, fee_input.1];
 
                 let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 0)?;
 
@@ -191,19 +285,22 @@ impl Cli {
                     cli_helper::explorer::broadcast_tx(&tx).await?;
                     println!("Broadcasted: {}", tx.txid());
 
-                    let swap_outpoint = simplicityhl::elements::OutPoint::new(tx.txid(), 0);
+                    let offer_outpoint = simplicityhl::elements::OutPoint::new(tx.txid(), 0);
 
                     let publishing_client = self.get_publishing_client(&config).await?;
 
-                    let swap_event =
-                        SwapCreatedEvent::new(swap_args.clone(), swap_outpoint, taproot_pubkey_gen.clone());
+                    let offer_event = OptionOfferCreatedEvent::new(
+                        option_offer_args.clone(),
+                        offer_outpoint,
+                        taproot_pubkey_gen.clone(),
+                    );
 
-                    let event_id = publishing_client.publish_swap_created(&swap_event).await?;
+                    let event_id = publishing_client.publish_option_offer_created(&offer_event).await?;
                     println!("Published to NOSTR: {event_id}");
 
                     let now = current_timestamp();
                     let history = vec![HistoryEntry::with_txid_and_nostr(
-                        ActionType::SwapCreated.as_str(),
+                        ActionType::OptionOfferCreated.as_str(),
                         &tx.txid().to_string(),
                         &event_id.to_hex(),
                         now,
@@ -220,8 +317,8 @@ impl Cli {
                     wallet
                         .store()
                         .add_contract(
-                            SWAP_WITH_CHANGE_SOURCE,
-                            swap_args.build_arguments(),
+                            OPTION_OFFER_SOURCE,
+                            option_offer_args.build_arguments(),
                             taproot_pubkey_gen.clone(),
                             Some(&metadata_bytes),
                         )
@@ -229,7 +326,7 @@ impl Cli {
 
                     wallet
                         .store()
-                        .insert_contract_token(&taproot_pubkey_gen, collateral_asset, SWAP_COLLATERAL_TAG)
+                        .insert_contract_token(&taproot_pubkey_gen, collateral_asset_id, OPTION_OFFER_COLLATERAL_TAG)
                         .await?;
 
                     wallet.store().insert_transaction(&tx, HashMap::default()).await?;
@@ -241,33 +338,33 @@ impl Cli {
 
                 Ok(())
             }
-            SwapCommand::Take {
-                swap_event,
+            OptionOfferCommand::Take {
+                offer_event,
                 fee,
                 broadcast,
             } => {
-                println!("Taking swap offer...");
+                println!("Taking option offer...");
 
-                let swap_contracts =
-                    <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), SWAP_WITH_CHANGE_SOURCE)
+                let offer_contracts =
+                    <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_OFFER_SOURCE)
                         .await?;
 
-                let mut active_swaps: Vec<LocalSwapData> = Vec::new();
-                for (args_bytes, tpg_str, metadata_bytes) in swap_contracts {
+                let mut active_offers: Vec<LocalOptionOfferData> = Vec::new();
+                for (args_bytes, tpg_str, metadata_bytes) in offer_contracts {
                     let Ok((arguments, _)): Result<(simplicityhl::Arguments, usize), _> =
                         bincode::serde::decode_from_slice(&args_bytes, bincode::config::standard())
                     else {
                         continue;
                     };
-                    let Ok(swap_args) = SwapWithChangeArguments::from_arguments(&arguments) else {
+                    let Ok(option_offer_args) = OptionOfferArguments::from_arguments(&arguments) else {
                         continue;
                     };
 
                     let Ok(taproot_pubkey_gen) = contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen::build_from_str(
                         &tpg_str,
-                        &swap_args,
+                        &option_offer_args,
                         config.address_params(),
-                        &contracts::swap_with_change::get_swap_with_change_address,
+                        &contracts::option_offer::get_option_offer_address,
                     ) else {
                         continue;
                     };
@@ -277,7 +374,7 @@ impl Cli {
                         .and_then(|b| ContractMetadata::from_bytes(b).ok())
                         .unwrap_or_default();
 
-                    let collateral_asset = swap_args.get_collateral_asset_id();
+                    let collateral_asset = option_offer_args.get_collateral_asset_id();
                     let filter = UtxoFilter::new()
                         .taproot_pubkey_gen(taproot_pubkey_gen.clone())
                         .asset_id(collateral_asset);
@@ -292,8 +389,8 @@ impl Cli {
                             UtxoQueryResult::Empty => None,
                         }
                     {
-                        active_swaps.push(LocalSwapData {
-                            swap_args,
+                        active_offers.push(LocalOptionOfferData {
+                            option_offer_args,
                             taproot_pubkey_gen,
                             metadata,
                             current_outpoint: outpoint,
@@ -302,8 +399,8 @@ impl Cli {
                     }
                 }
 
-                let selected_swap = if let Some(event_id_str) = swap_event {
-                    active_swaps
+                let selected_offer = if let Some(event_id_str) = offer_event {
+                    active_offers
                         .into_iter()
                         .find(|s| {
                             s.metadata
@@ -311,37 +408,39 @@ impl Cli {
                                 .as_ref()
                                 .is_some_and(|id| id.starts_with(event_id_str))
                         })
-                        .ok_or_else(|| Error::Config(format!("Swap event not found or fully taken: {event_id_str}")))?
+                        .ok_or_else(|| {
+                            Error::Config(format!("Option offer event not found or fully taken: {event_id_str}"))
+                        })?
                 } else {
-                    if active_swaps.is_empty() {
+                    if active_offers.is_empty() {
                         return Err(Error::Config(
-                            "No active swap offers found. Run `sync nostr` first to sync swap events from relays, \
+                            "No active option offers found. Run `sync nostr` first to sync events from relays, \
                              then `sync spent` to update UTXO status."
                                 .to_string(),
                         ));
                     }
 
-                    let active_swap_displays = build_active_swaps_displays(&active_swaps);
-                    display_active_swaps_table(&active_swap_displays);
+                    let active_offer_displays = build_active_option_offers_displays(&active_offers);
+                    display_active_option_offers_table(&active_offer_displays);
                     println!();
 
                     let selection =
-                        crate::cli::interactive::prompt_selection("Select swap offer to take", active_swaps.len())
+                        crate::cli::interactive::prompt_selection("Select option offer to take", active_offers.len())
                             .map_err(Error::Io)?
                             .ok_or_else(|| Error::Config("Selection cancelled".to_string()))?;
 
-                    active_swaps
+                    active_offers
                         .into_iter()
                         .nth(selection)
                         .ok_or_else(|| Error::Config("Invalid selection".to_string()))?
                 };
 
-                let args = &selected_swap.swap_args;
-                let current_swap_outpoint = selected_swap.current_outpoint;
-                let actual_collateral = selected_swap.current_value;
+                let args = &selected_offer.option_offer_args;
+                let current_offer_outpoint = selected_offer.current_outpoint;
+                let actual_collateral = selected_offer.current_value;
 
-                let event_id_display = selected_swap.metadata.nostr_event_id.as_deref().unwrap_or("local");
-                println!("  Swap event: {event_id_display}");
+                let event_id_display = selected_offer.metadata.nostr_event_id.as_deref().unwrap_or("local");
+                println!("  Offer event: {event_id_display}");
                 println!("  Collateral available: {actual_collateral}");
                 println!(
                     "  Price: {} (settlement per collateral)",
@@ -415,17 +514,23 @@ impl Cli {
                     &fee_entries[0]
                 };
 
-                let swap_txout = cli_helper::explorer::fetch_utxo(current_swap_outpoint).await?;
+                let collateral_txout = cli_helper::explorer::fetch_utxo(current_offer_outpoint).await?;
 
-                let swap_input = (current_swap_outpoint, swap_txout.clone());
+                let premium_outpoint =
+                    simplicityhl::elements::OutPoint::new(current_offer_outpoint.txid, current_offer_outpoint.vout + 1);
+                let premium_txout = cli_helper::explorer::fetch_utxo(premium_outpoint).await?;
+
+                let collateral_input = (current_offer_outpoint, collateral_txout.clone());
+                let premium_input = (premium_outpoint, premium_txout.clone());
                 let settlement_input = (*settlement_utxo.outpoint(), settlement_utxo.txout().clone());
                 let fee_input = (*fee_utxo.outpoint(), fee_utxo.txout().clone());
 
                 let actual_fee = if let Some(f) = fee {
                     *f
                 } else {
-                    let (pst, branch) = contracts::sdk::build_swap_exercise(
-                        swap_input.clone(),
+                    let (pst, branch) = contracts::sdk::build_option_offer_exercise(
+                        collateral_input.clone(),
+                        premium_input.clone(),
                         settlement_input.clone(),
                         fee_input.clone(),
                         collateral_amount_to_receive,
@@ -434,19 +539,36 @@ impl Cli {
                         script_pubkey.clone(),
                     )?;
                     let mut tx = pst.extract_tx()?;
-                    let utxos = vec![swap_txout.clone(), settlement_input.1.clone(), fee_input.1.clone()];
-                    let swap_program = get_swap_with_change_program(args)?;
-                    tx = finalize_swap_with_change_transaction(
+                    let utxos = vec![
+                        collateral_txout.clone(),
+                        premium_txout.clone(),
+                        settlement_input.1.clone(),
+                        fee_input.1.clone(),
+                    ];
+                    let offer_program = get_option_offer_program(args)?;
+                    tx = finalize_option_offer_transaction(
                         tx,
-                        &selected_swap.taproot_pubkey_gen.get_x_only_pubkey(),
-                        &swap_program,
+                        &selected_offer.taproot_pubkey_gen.get_x_only_pubkey(),
+                        &offer_program,
                         &utxos,
                         0,
                         &branch,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
                     )?;
-                    let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
+                    tx = finalize_option_offer_transaction(
+                        tx,
+                        &selected_offer.taproot_pubkey_gen.get_x_only_pubkey(),
+                        &offer_program,
+                        &utxos,
+                        1,
+                        &branch,
+                        config.address_params(),
+                        *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
+                    )?;
+                    let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 2)?;
                     let signed_weight = tx.weight();
                     let fee_rate = config.get_fee_rate();
                     let estimated = crate::fee::calculate_fee(signed_weight, fee_rate);
@@ -458,8 +580,9 @@ impl Cli {
 
                 println!("  Fee: {actual_fee} sats");
 
-                let (pst, branch) = contracts::sdk::build_swap_exercise(
-                    swap_input.clone(),
+                let (pst, branch) = contracts::sdk::build_option_offer_exercise(
+                    collateral_input.clone(),
+                    premium_input.clone(),
                     settlement_input.clone(),
                     fee_input.clone(),
                     collateral_amount_to_receive,
@@ -469,34 +592,52 @@ impl Cli {
                 )?;
 
                 let mut tx = pst.extract_tx()?;
-                let utxos = vec![swap_txout.clone(), settlement_input.1.clone(), fee_input.1.clone()];
+                let utxos = vec![
+                    collateral_txout.clone(),
+                    premium_txout.clone(),
+                    settlement_input.1.clone(),
+                    fee_input.1.clone(),
+                ];
 
-                let swap_program = get_swap_with_change_program(args)?;
-                tx = finalize_swap_with_change_transaction(
+                let offer_program = get_option_offer_program(args)?;
+                tx = finalize_option_offer_transaction(
                     tx,
-                    &selected_swap.taproot_pubkey_gen.get_x_only_pubkey(),
-                    &swap_program,
+                    &selected_offer.taproot_pubkey_gen.get_x_only_pubkey(),
+                    &offer_program,
                     &utxos,
                     0,
                     &branch,
                     config.address_params(),
                     *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
                 )?;
 
-                let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
+                tx = finalize_option_offer_transaction(
+                    tx,
+                    &selected_offer.taproot_pubkey_gen.get_x_only_pubkey(),
+                    &offer_program,
+                    &utxos,
+                    1,
+                    &branch,
+                    config.address_params(),
+                    *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
+                )?;
+
+                let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 2)?;
 
                 if *broadcast {
                     cli_helper::explorer::broadcast_tx(&tx).await?;
                     println!("Broadcasted: {}", tx.txid());
 
-                    if let Some(ref nostr_event_id) = selected_swap.metadata.nostr_event_id
+                    if let Some(ref nostr_event_id) = selected_offer.metadata.nostr_event_id
                         && let Ok(event_id) = nostr::EventId::from_hex(nostr_event_id)
                     {
                         let publishing_client = self.get_publishing_client(&config).await?;
 
                         let action_event = ActionCompletedEvent::new(
                             event_id,
-                            ActionType::SwapExercised,
+                            ActionType::OptionOfferExercised,
                             simplicityhl::elements::OutPoint::new(tx.txid(), 0),
                         );
 
@@ -509,59 +650,59 @@ impl Cli {
                     wallet.store().insert_transaction(&tx, HashMap::default()).await?;
 
                     let entry = HistoryEntry::with_txid(
-                        ActionType::SwapExercised.as_str(),
+                        ActionType::OptionOfferExercised.as_str(),
                         &tx.txid().to_string(),
                         current_timestamp(),
                     );
-                    crate::sync::add_history_entry(wallet.store(), &selected_swap.taproot_pubkey_gen, entry).await?;
+                    crate::sync::add_history_entry(wallet.store(), &selected_offer.taproot_pubkey_gen, entry).await?;
                 } else {
                     println!("{}", tx.serialize().to_lower_hex_string());
                 }
 
                 Ok(())
             }
-            SwapCommand::Cancel {
-                swap_event,
+            OptionOfferCommand::Cancel {
+                offer_event,
                 fee,
                 broadcast,
             } => {
-                println!("Cancelling swap offer (reclaiming collateral after expiry)...");
+                println!("Cancelling option offer (reclaiming collateral + premium after expiry)...");
 
-                let swap_contracts =
-                    <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), SWAP_WITH_CHANGE_SOURCE)
+                let offer_contracts =
+                    <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_OFFER_SOURCE)
                         .await?;
 
-                if swap_contracts.is_empty() {
+                if offer_contracts.is_empty() {
                     return Err(Error::Config(
-                        "No swap contracts found in local database. Create a swap first or run `sync nostr` to import."
+                        "No option offer contracts found in local database. Create an offer first or run `sync nostr` to import."
                             .to_string(),
                     ));
                 }
 
-                println!("Checking swap status...");
+                println!("Checking offer status...");
 
-                let mut cancellable_swaps: Vec<LocalCancellableSwap> = Vec::new();
+                let mut cancellable_offers: Vec<LocalCancellableOptionOffer> = Vec::new();
 
-                for (args_bytes, tpg_str, metadata_bytes) in swap_contracts {
+                for (args_bytes, tpg_str, metadata_bytes) in offer_contracts {
                     let Ok((arguments, _)): Result<(simplicityhl::Arguments, usize), _> =
                         bincode::serde::decode_from_slice(&args_bytes, bincode::config::standard())
                     else {
                         continue;
                     };
-                    let Ok(swap_args) = SwapWithChangeArguments::from_arguments(&arguments) else {
+                    let Ok(option_offer_args) = OptionOfferArguments::from_arguments(&arguments) else {
                         continue;
                     };
 
-                    let is_expired = current_timestamp() > i64::from(swap_args.expiry_time());
+                    let is_expired = current_timestamp() > i64::from(option_offer_args.expiry_time());
                     if !is_expired {
-                        continue; // Skip non-expired swaps
+                        continue; // Skip non-expired offers
                     }
 
                     let Ok(taproot_pubkey_gen) = contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen::build_from_str(
                         &tpg_str,
-                        &swap_args,
+                        &option_offer_args,
                         config.address_params(),
-                        &contracts::swap_with_change::get_swap_with_change_address,
+                        &contracts::option_offer::get_option_offer_address,
                     ) else {
                         continue;
                     };
@@ -571,38 +712,41 @@ impl Cli {
                         .and_then(|b| ContractMetadata::from_bytes(b).ok())
                         .unwrap_or_default();
 
-                    let collateral_asset = swap_args.get_collateral_asset_id();
+                    let collateral_asset = option_offer_args.get_collateral_asset_id();
                     let filter = UtxoFilter::new()
                         .taproot_pubkey_gen(taproot_pubkey_gen.clone())
                         .asset_id(collateral_asset);
 
-                    if let Ok(results) = <_ as UtxoStore>::query_utxos(wallet.store(), &[filter]).await {
-                        let has_collateral = matches!(&results[0],
-                            UtxoQueryResult::Found(entries, _) | UtxoQueryResult::InsufficientValue(entries, _)
-                            if !entries.is_empty()
-                        );
-                        if has_collateral {
-                            cancellable_swaps.push(LocalCancellableSwap {
-                                swap_args,
-                                taproot_pubkey_gen,
-                                metadata,
-                            });
-                        }
+                    if let Ok(results) = <_ as UtxoStore>::query_utxos(wallet.store(), &[filter]).await
+                        && let UtxoQueryResult::Found(entries, _) | UtxoQueryResult::InsufficientValue(entries, _) =
+                            &results[0]
+                        && let Some(entry) = entries.first()
+                        && let Some(collateral_value) = entry.value()
+                    {
+                        // Calculate premium: collateral * premium_per_collateral rate
+                        let premium_amount = collateral_value * option_offer_args.premium_per_collateral();
+                        cancellable_offers.push(LocalCancellableOptionOffer {
+                            option_offer_args,
+                            taproot_pubkey_gen,
+                            metadata,
+                            collateral_amount: collateral_value,
+                            premium_amount,
+                        });
                     }
                 }
 
-                if cancellable_swaps.is_empty() {
+                if cancellable_offers.is_empty() {
                     return Err(Error::Config(
-                        "No cancellable swaps found. Swaps must be expired and still have collateral. Run `sync utxos` first.".to_string(),
+                        "No cancellable offers found. Offers must be expired and still have collateral. Run `sync utxos` first.".to_string(),
                     ));
                 }
 
-                let cancellable_swap_displays = build_cancellable_swaps_displays(&cancellable_swaps);
-                display_cancellable_swaps_table(&cancellable_swap_displays);
+                let cancellable_offer_displays = build_cancellable_option_offers_displays(&cancellable_offers);
+                display_cancellable_option_offers_table(&cancellable_offer_displays);
                 println!();
 
-                let selected = if let Some(event_id_str) = swap_event {
-                    cancellable_swaps
+                let selected = if let Some(event_id_str) = offer_event {
+                    cancellable_offers
                         .into_iter()
                         .find(|cs| {
                             cs.metadata
@@ -610,26 +754,26 @@ impl Cli {
                                 .as_ref()
                                 .is_some_and(|id| id.starts_with(event_id_str))
                         })
-                        .ok_or_else(|| Error::Config(format!("Swap event not found: {event_id_str}")))?
+                        .ok_or_else(|| Error::Config(format!("Offer event not found: {event_id_str}")))?
                 } else {
                     let selection = crate::cli::interactive::prompt_selection(
-                        "Select swap offer to cancel",
-                        cancellable_swaps.len(),
+                        "Select option offer to cancel",
+                        cancellable_offers.len(),
                     )
                     .map_err(Error::Io)?
                     .ok_or_else(|| Error::Config("Selection cancelled".to_string()))?;
 
-                    cancellable_swaps
+                    cancellable_offers
                         .into_iter()
                         .nth(selection)
                         .ok_or_else(|| Error::Config("Invalid selection".to_string()))?
                 };
 
-                let args = &selected.swap_args;
+                let args = &selected.option_offer_args;
                 let taproot_pubkey_gen = &selected.taproot_pubkey_gen;
 
                 if let Some(ref event_id) = selected.metadata.nostr_event_id {
-                    println!("  Swap event: {event_id}");
+                    println!("  Offer event: {event_id}");
                 }
 
                 let initial_fee = fee.unwrap_or(PLACEHOLDER_FEE);
@@ -656,59 +800,90 @@ impl Cli {
                     .asset_id(collateral_asset);
 
                 let results = <_ as UtxoStore>::query_utxos(wallet.store(), &[filter]).await?;
-                let swap_entry = match &results[0] {
+                let offer_entry = match &results[0] {
                     UtxoQueryResult::Found(entries, _) | UtxoQueryResult::InsufficientValue(entries, _) => {
                         entries.first().ok_or_else(|| Error::Config(
-                            "No collateral UTXO found at contract address. Swap may have been taken. Run `sync utxos` to update.".to_string()
+                            "No collateral UTXO found at contract address. Offer may have been taken. Run `sync utxos` to update.".to_string()
                         ))?
                     }
                     UtxoQueryResult::Empty => {
                         return Err(Error::Config(
-                            "No collateral UTXO found at contract address. Swap may have been taken. Run `sync utxos` to update.".to_string()
+                            "No collateral UTXO found at contract address. Offer may have been taken. Run `sync utxos` to update.".to_string()
                         ));
                     }
                 };
 
-                let current_outpoint = *swap_entry.outpoint();
-                let swap_txout = swap_entry.txout().clone();
-                let swap_input = (current_outpoint, swap_txout.clone());
+                let current_outpoint = *offer_entry.outpoint();
+                let collateral_txout = offer_entry.txout().clone();
+
+                let premium_outpoint =
+                    simplicityhl::elements::OutPoint::new(current_outpoint.txid, current_outpoint.vout + 1);
+                let premium_txout = cli_helper::explorer::fetch_utxo(premium_outpoint).await?;
+
+                let collateral_input = (current_outpoint, collateral_txout.clone());
+                let premium_input = (premium_outpoint, premium_txout.clone());
 
                 let actual_fee = if let Some(f) = fee {
                     *f
                 } else {
-                    let pst = contracts::sdk::build_swap_expiry(
-                        swap_input.clone(),
+                    let pst = contracts::sdk::build_option_offer_expiry(
+                        collateral_input.clone(),
+                        premium_input.clone(),
                         fee_input.clone(),
                         PLACEHOLDER_FEE,
                         args,
                         script_pubkey.clone(),
                     )?;
                     let mut tx = pst.extract_tx()?;
-                    let utxos = vec![swap_txout.clone(), fee_input.1.clone()];
-                    let swap_program = get_swap_with_change_program(args)?;
+                    let utxos = vec![collateral_txout.clone(), premium_txout.clone(), fee_input.1.clone()];
+                    let offer_program = get_option_offer_program(args)?;
                     let signature = wallet.signer().sign_contract(
                         &tx,
-                        &swap_program,
+                        &offer_program,
                         &taproot_pubkey_gen.get_x_only_pubkey(),
                         &utxos,
                         0,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
                     )?;
-                    let branch = contracts::swap_with_change::build_witness::SwapWithChangeBranch::Expiry {
+                    let branch = contracts::option_offer::build_witness::OptionOfferBranch::Expiry {
                         schnorr_signature: signature,
                     };
-                    tx = finalize_swap_with_change_transaction(
+                    tx = finalize_option_offer_transaction(
                         tx,
                         &taproot_pubkey_gen.get_x_only_pubkey(),
-                        &swap_program,
+                        &offer_program,
                         &utxos,
                         0,
                         &branch,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
                     )?;
-                    let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
+                    let signature = wallet.signer().sign_contract(
+                        &tx,
+                        &offer_program,
+                        &taproot_pubkey_gen.get_x_only_pubkey(),
+                        &utxos,
+                        1,
+                        config.address_params(),
+                        *LIQUID_TESTNET_GENESIS,
+                    )?;
+                    let branch = contracts::option_offer::build_witness::OptionOfferBranch::Expiry {
+                        schnorr_signature: signature,
+                    };
+                    tx = finalize_option_offer_transaction(
+                        tx,
+                        &taproot_pubkey_gen.get_x_only_pubkey(),
+                        &offer_program,
+                        &utxos,
+                        1,
+                        &branch,
+                        config.address_params(),
+                        *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
+                    )?;
+                    let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 2)?;
                     let signed_weight = tx.weight();
                     let fee_rate = config.get_fee_rate();
                     let estimated = crate::fee::calculate_fee(signed_weight, fee_rate);
@@ -720,8 +895,9 @@ impl Cli {
 
                 println!("  Fee: {actual_fee} sats");
 
-                let pst = contracts::sdk::build_swap_expiry(
-                    swap_input.clone(),
+                let pst = contracts::sdk::build_option_offer_expiry(
+                    collateral_input.clone(),
+                    premium_input.clone(),
                     fee_input.clone(),
                     actual_fee,
                     args,
@@ -729,12 +905,12 @@ impl Cli {
                 )?;
 
                 let mut tx = pst.extract_tx()?;
-                let utxos = vec![swap_txout.clone(), fee_input.1.clone()];
-                let swap_program = get_swap_with_change_program(args)?;
+                let utxos = vec![collateral_txout.clone(), premium_txout.clone(), fee_input.1.clone()];
+                let offer_program = get_option_offer_program(args)?;
 
                 let signature = wallet.signer().sign_contract(
                     &tx,
-                    &swap_program,
+                    &offer_program,
                     &taproot_pubkey_gen.get_x_only_pubkey(),
                     &utxos,
                     0,
@@ -742,22 +918,49 @@ impl Cli {
                     *LIQUID_TESTNET_GENESIS,
                 )?;
 
-                let branch = contracts::swap_with_change::build_witness::SwapWithChangeBranch::Expiry {
+                let branch = contracts::option_offer::build_witness::OptionOfferBranch::Expiry {
                     schnorr_signature: signature,
                 };
 
-                tx = finalize_swap_with_change_transaction(
+                tx = finalize_option_offer_transaction(
                     tx,
                     &taproot_pubkey_gen.get_x_only_pubkey(),
-                    &swap_program,
+                    &offer_program,
                     &utxos,
                     0,
                     &branch,
                     config.address_params(),
                     *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
                 )?;
 
-                let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
+                let signature = wallet.signer().sign_contract(
+                    &tx,
+                    &offer_program,
+                    &taproot_pubkey_gen.get_x_only_pubkey(),
+                    &utxos,
+                    1,
+                    config.address_params(),
+                    *LIQUID_TESTNET_GENESIS,
+                )?;
+
+                let branch = contracts::option_offer::build_witness::OptionOfferBranch::Expiry {
+                    schnorr_signature: signature,
+                };
+
+                tx = finalize_option_offer_transaction(
+                    tx,
+                    &taproot_pubkey_gen.get_x_only_pubkey(),
+                    &offer_program,
+                    &utxos,
+                    1,
+                    &branch,
+                    config.address_params(),
+                    *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
+                )?;
+
+                let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 2)?;
 
                 if *broadcast {
                     cli_helper::explorer::broadcast_tx(&tx).await?;
@@ -770,7 +973,7 @@ impl Cli {
 
                         let action_event = ActionCompletedEvent::new(
                             event_id,
-                            ActionType::SwapCancelled,
+                            ActionType::OptionOfferCancelled,
                             simplicityhl::elements::OutPoint::new(tx.txid(), 0),
                         );
 
@@ -783,7 +986,7 @@ impl Cli {
                     wallet.store().insert_transaction(&tx, HashMap::default()).await?;
 
                     let entry = HistoryEntry::with_txid(
-                        ActionType::SwapCancelled.as_str(),
+                        ActionType::OptionOfferCancelled.as_str(),
                         &tx.txid().to_string(),
                         current_timestamp(),
                     );
@@ -794,43 +997,43 @@ impl Cli {
 
                 Ok(())
             }
-            SwapCommand::Withdraw {
-                swap_event,
+            OptionOfferCommand::Withdraw {
+                offer_event,
                 fee,
                 broadcast,
             } => {
-                println!("Withdrawing settlement from swap (claiming payment after swap was taken)...");
+                println!("Withdrawing settlement from option offer (claiming payment after offer was taken)...");
 
-                let swap_contracts =
-                    <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), SWAP_WITH_CHANGE_SOURCE)
+                let offer_contracts =
+                    <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_OFFER_SOURCE)
                         .await?;
 
-                if swap_contracts.is_empty() {
+                if offer_contracts.is_empty() {
                     return Err(Error::Config(
-                        "No swap contracts found in local database. Create a swap first or run `sync nostr` to import."
+                        "No option offer contracts found in local database. Create an offer first or run `sync nostr` to import."
                             .to_string(),
                     ));
                 }
 
-                println!("Checking swap status...");
+                println!("Checking offer status...");
 
-                let mut withdrawable_swaps: Vec<LocalWithdrawableSwap> = Vec::new();
+                let mut withdrawable_offers: Vec<LocalWithdrawableOptionOffer> = Vec::new();
 
-                for (args_bytes, tpg_str, metadata_bytes) in swap_contracts {
+                for (args_bytes, tpg_str, metadata_bytes) in offer_contracts {
                     let Ok((arguments, _)): Result<(simplicityhl::Arguments, usize), _> =
                         bincode::serde::decode_from_slice(&args_bytes, bincode::config::standard())
                     else {
                         continue;
                     };
-                    let Ok(swap_args) = SwapWithChangeArguments::from_arguments(&arguments) else {
+                    let Ok(option_offer_args) = OptionOfferArguments::from_arguments(&arguments) else {
                         continue;
                     };
 
                     let Ok(taproot_pubkey_gen) = contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen::build_from_str(
                         &tpg_str,
-                        &swap_args,
+                        &option_offer_args,
                         config.address_params(),
-                        &contracts::swap_with_change::get_swap_with_change_address,
+                        &contracts::option_offer::get_option_offer_address,
                     ) else {
                         continue;
                     };
@@ -840,7 +1043,7 @@ impl Cli {
                         .and_then(|b| ContractMetadata::from_bytes(b).ok())
                         .unwrap_or_default();
 
-                    let settlement_asset = swap_args.get_settlement_asset_id();
+                    let settlement_asset = option_offer_args.get_settlement_asset_id();
                     let filter = UtxoFilter::new()
                         .taproot_pubkey_gen(taproot_pubkey_gen.clone())
                         .asset_id(settlement_asset);
@@ -852,10 +1055,10 @@ impl Cli {
                         && let Some(value) = entry.value()
                     {
                         let wallet_pubkey = wallet.signer().public_key();
-                        let contract_user_pubkey = swap_args.user_pubkey();
+                        let contract_user_pubkey = option_offer_args.user_pubkey();
                         if wallet_pubkey.serialize() == contract_user_pubkey {
-                            withdrawable_swaps.push(LocalWithdrawableSwap {
-                                swap_args,
+                            withdrawable_offers.push(LocalWithdrawableOptionOffer {
+                                option_offer_args,
                                 taproot_pubkey_gen,
                                 metadata,
                                 settlement_amount: value,
@@ -864,19 +1067,19 @@ impl Cli {
                     }
                 }
 
-                if withdrawable_swaps.is_empty() {
+                if withdrawable_offers.is_empty() {
                     return Err(Error::Config(
-                        "No withdrawable swaps found. Either:\n  - No swaps have been taken yet\n  - The taken swaps belong to a different wallet (pubkey mismatch)\n  - Run `sync utxos` to update"
+                        "No withdrawable offers found. Either:\n  - No offers have been taken yet\n  - The taken offers belong to a different wallet (pubkey mismatch)\n  - Run `sync utxos` to update"
                             .to_string(),
                     ));
                 }
 
-                let withdrawable_swap_displays = build_withdrawable_swaps_displays(&withdrawable_swaps);
-                display_withdrawable_swaps_table(&withdrawable_swap_displays);
+                let withdrawable_offer_displays = build_withdrawable_option_offers_displays(&withdrawable_offers);
+                display_withdrawable_option_offers_table(&withdrawable_offer_displays);
                 println!();
 
-                let selected = if let Some(event_id_str) = swap_event {
-                    withdrawable_swaps
+                let selected = if let Some(event_id_str) = offer_event {
+                    withdrawable_offers
                         .into_iter()
                         .find(|ws| {
                             ws.metadata
@@ -884,26 +1087,26 @@ impl Cli {
                                 .as_ref()
                                 .is_some_and(|id| id.starts_with(event_id_str))
                         })
-                        .ok_or_else(|| Error::Config(format!("Swap event not found: {event_id_str}")))?
+                        .ok_or_else(|| Error::Config(format!("Offer event not found: {event_id_str}")))?
                 } else {
                     let selection = crate::cli::interactive::prompt_selection(
-                        "Select swap to withdraw from",
-                        withdrawable_swaps.len(),
+                        "Select offer to withdraw from",
+                        withdrawable_offers.len(),
                     )
                     .map_err(Error::Io)?
                     .ok_or_else(|| Error::Config("Selection cancelled".to_string()))?;
 
-                    withdrawable_swaps
+                    withdrawable_offers
                         .into_iter()
                         .nth(selection)
                         .ok_or_else(|| Error::Config("Invalid selection".to_string()))?
                 };
 
-                let args = &selected.swap_args;
+                let args = &selected.option_offer_args;
                 let taproot_pubkey_gen = &selected.taproot_pubkey_gen;
 
                 if let Some(ref event_id) = selected.metadata.nostr_event_id {
-                    println!("  Swap event: {event_id}");
+                    println!("  Offer event: {event_id}");
                 }
 
                 let initial_fee = fee.unwrap_or(PLACEHOLDER_FEE);
@@ -930,7 +1133,7 @@ impl Cli {
                     .asset_id(settlement_asset);
 
                 let results = <_ as UtxoStore>::query_utxos(wallet.store(), &[filter]).await?;
-                let swap_entry = match &results[0] {
+                let offer_entry = match &results[0] {
                     UtxoQueryResult::Found(entries, _) | UtxoQueryResult::InsufficientValue(entries, _) => {
                         entries.first().ok_or_else(|| {
                             Error::Config(
@@ -945,44 +1148,45 @@ impl Cli {
                     }
                 };
 
-                let current_outpoint = *swap_entry.outpoint();
-                let swap_txout = swap_entry.txout().clone();
-                let swap_input = (current_outpoint, swap_txout.clone());
+                let current_outpoint = *offer_entry.outpoint();
+                let offer_txout = offer_entry.txout().clone();
+                let offer_input = (current_outpoint, offer_txout.clone());
 
                 let actual_fee = if let Some(f) = fee {
                     *f
                 } else {
-                    let pst = contracts::sdk::build_swap_withdraw(
-                        swap_input.clone(),
+                    let pst = contracts::sdk::build_option_offer_withdraw(
+                        offer_input.clone(),
                         fee_input.clone(),
                         PLACEHOLDER_FEE,
                         args,
                         script_pubkey.clone(),
                     )?;
                     let mut tx = pst.extract_tx()?;
-                    let utxos = vec![swap_txout.clone(), fee_input.1.clone()];
-                    let swap_program = get_swap_with_change_program(args)?;
+                    let utxos = vec![offer_txout.clone(), fee_input.1.clone()];
+                    let offer_program = get_option_offer_program(args)?;
                     let signature = wallet.signer().sign_contract(
                         &tx,
-                        &swap_program,
+                        &offer_program,
                         &taproot_pubkey_gen.get_x_only_pubkey(),
                         &utxos,
                         0,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
                     )?;
-                    let branch = contracts::swap_with_change::build_witness::SwapWithChangeBranch::Withdraw {
+                    let branch = contracts::option_offer::build_witness::OptionOfferBranch::Withdraw {
                         schnorr_signature: signature,
                     };
-                    tx = finalize_swap_with_change_transaction(
+                    tx = finalize_option_offer_transaction(
                         tx,
                         &taproot_pubkey_gen.get_x_only_pubkey(),
-                        &swap_program,
+                        &offer_program,
                         &utxos,
                         0,
                         &branch,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
                     )?;
                     let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
                     let signed_weight = tx.weight();
@@ -996,8 +1200,8 @@ impl Cli {
 
                 println!("  Fee: {actual_fee} sats");
 
-                let pst = contracts::sdk::build_swap_withdraw(
-                    swap_input.clone(),
+                let pst = contracts::sdk::build_option_offer_withdraw(
+                    offer_input.clone(),
                     fee_input.clone(),
                     actual_fee,
                     args,
@@ -1005,12 +1209,12 @@ impl Cli {
                 )?;
 
                 let mut tx = pst.extract_tx()?;
-                let utxos = vec![swap_txout.clone(), fee_input.1.clone()];
-                let swap_program = get_swap_with_change_program(args)?;
+                let utxos = vec![offer_txout.clone(), fee_input.1.clone()];
+                let offer_program = get_option_offer_program(args)?;
 
                 let signature = wallet.signer().sign_contract(
                     &tx,
-                    &swap_program,
+                    &offer_program,
                     &taproot_pubkey_gen.get_x_only_pubkey(),
                     &utxos,
                     0,
@@ -1018,19 +1222,20 @@ impl Cli {
                     *LIQUID_TESTNET_GENESIS,
                 )?;
 
-                let branch = contracts::swap_with_change::build_witness::SwapWithChangeBranch::Withdraw {
+                let branch = contracts::option_offer::build_witness::OptionOfferBranch::Withdraw {
                     schnorr_signature: signature,
                 };
 
-                tx = finalize_swap_with_change_transaction(
+                tx = finalize_option_offer_transaction(
                     tx,
                     &taproot_pubkey_gen.get_x_only_pubkey(),
-                    &swap_program,
+                    &offer_program,
                     &utxos,
                     0,
                     &branch,
                     config.address_params(),
                     *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
                 )?;
 
                 let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
@@ -1058,7 +1263,8 @@ impl Cli {
 
                     wallet.store().insert_transaction(&tx, HashMap::default()).await?;
 
-                    let entry = HistoryEntry::with_txid("swap_withdrawn", &tx.txid().to_string(), current_timestamp());
+                    let entry =
+                        HistoryEntry::with_txid("option_offer_withdrawn", &tx.txid().to_string(), current_timestamp());
                     crate::sync::add_history_entry(wallet.store(), taproot_pubkey_gen, entry).await?;
                 } else {
                     println!("{}", tx.serialize().to_lower_hex_string());
@@ -1070,39 +1276,51 @@ impl Cli {
     }
 }
 
-fn build_active_swaps_displays(active_swaps: &[LocalSwapData]) -> Vec<ActiveSwapDisplay> {
-    active_swaps
+fn build_active_option_offers_displays(active_offers: &[LocalOptionOfferData]) -> Vec<ActiveOptionOfferDisplay> {
+    active_offers
         .iter()
         .enumerate()
-        .map(|(idx, swap)| {
-            let seller = swap.metadata.nostr_author.as_deref().unwrap_or("unknown");
-            let price = swap.swap_args.collateral_per_contract();
-            ActiveSwapDisplay {
+        .map(|(idx, offer)| {
+            let seller = offer.metadata.nostr_author.as_deref().unwrap_or("unknown");
+            let price = offer.option_offer_args.collateral_per_contract();
+            ActiveOptionOfferDisplay {
                 index: idx + 1,
-                offering: swap.current_value.to_string(),
+                offering: offer.current_value.to_string(),
                 price: price.to_string(),
-                wants: format_settlement_asset(&swap.swap_args.get_settlement_asset_id()),
-                expires: format_relative_time(i64::from(swap.swap_args.expiry_time())),
+                wants: format_settlement_asset(&offer.option_offer_args.get_settlement_asset_id()),
+                expires: format_relative_time(i64::from(offer.option_offer_args.expiry_time())),
                 seller: truncate_with_ellipsis(seller, 12),
             }
         })
         .collect()
 }
 
-fn build_cancellable_swaps_displays(cancellable_swaps: &[LocalCancellableSwap]) -> Vec<CancellableSwapDisplay> {
-    cancellable_swaps
+fn build_cancellable_option_offers_displays(
+    cancellable_offers: &[LocalCancellableOptionOffer],
+) -> Vec<CancellableOptionOfferDisplay> {
+    cancellable_offers
         .iter()
         .enumerate()
         .map(|(idx, cs)| {
-            let expiry_time = cs.swap_args.expiry_time();
+            let expiry_time = cs.option_offer_args.expiry_time();
             let contract_short = cs.metadata.nostr_event_id.as_ref().map_or_else(
                 || truncate_with_ellipsis(&cs.taproot_pubkey_gen.to_string(), 16),
                 |id| truncate_with_ellipsis(id, 16),
             );
-            CancellableSwapDisplay {
+            let premium_display = if cs.premium_amount > 0 {
+                format!(
+                    "{} {}",
+                    cs.premium_amount,
+                    format_settlement_asset(&cs.option_offer_args.get_premium_asset_id())
+                )
+            } else {
+                "0".to_string()
+            };
+            CancellableOptionOfferDisplay {
                 index: idx + 1,
-                collateral: "available".to_string(),
-                asset: format_settlement_asset(&cs.swap_args.get_collateral_asset_id()),
+                collateral: cs.collateral_amount.to_string(),
+                premium: premium_display,
+                asset: format_settlement_asset(&cs.option_offer_args.get_collateral_asset_id()),
                 expired: format!("expired ({expiry_time})"),
                 contract: contract_short,
             }
@@ -1110,8 +1328,10 @@ fn build_cancellable_swaps_displays(cancellable_swaps: &[LocalCancellableSwap]) 
         .collect()
 }
 
-fn build_withdrawable_swaps_displays(withdrawable_swaps: &[LocalWithdrawableSwap]) -> Vec<WithdrawableSwapDisplay> {
-    withdrawable_swaps
+fn build_withdrawable_option_offers_displays(
+    withdrawable_offers: &[LocalWithdrawableOptionOffer],
+) -> Vec<WithdrawableOptionOfferDisplay> {
+    withdrawable_offers
         .iter()
         .enumerate()
         .map(|(idx, ws)| {
@@ -1119,10 +1339,10 @@ fn build_withdrawable_swaps_displays(withdrawable_swaps: &[LocalWithdrawableSwap
                 || truncate_with_ellipsis(&ws.taproot_pubkey_gen.to_string(), 16),
                 |id| truncate_with_ellipsis(id, 16),
             );
-            WithdrawableSwapDisplay {
+            WithdrawableOptionOfferDisplay {
                 index: idx + 1,
                 settlement: ws.settlement_amount.to_string(),
-                asset: format_settlement_asset(&ws.swap_args.get_settlement_asset_id()),
+                asset: format_settlement_asset(&ws.option_offer_args.get_settlement_asset_id()),
                 contract: contract_short,
             }
         })

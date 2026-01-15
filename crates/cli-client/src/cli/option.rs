@@ -21,6 +21,7 @@ use simplicityhl::elements::pset::serialize::Serialize;
 use simplicityhl::elements::secp256k1_zkp::SECP256K1;
 use simplicityhl::elements::{OutPoint, TxOut, TxOutSecrets};
 use simplicityhl::simplicity::hex::DisplayHex;
+use simplicityhl::tracker::TrackerLogLevel;
 use simplicityhl_core::{LIQUID_TESTNET_BITCOIN_ASSET, LIQUID_TESTNET_GENESIS, derive_public_blinder_key};
 
 impl Cli {
@@ -226,6 +227,7 @@ impl Cli {
                             &branch,
                             config.address_params(),
                             *LIQUID_TESTNET_GENESIS,
+                            TrackerLogLevel::None,
                         )?;
                     }
                     let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 2)?;
@@ -272,6 +274,7 @@ impl Cli {
                         &option_branch,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
                     )?;
                 }
 
@@ -567,6 +570,7 @@ impl Cli {
                         &branch,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
                     )?;
                     let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
                     let signed_weight = tx.weight();
@@ -606,6 +610,7 @@ impl Cli {
                     &option_branch,
                     config.address_params(),
                     *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
                 )?;
 
                 let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
@@ -807,6 +812,7 @@ impl Cli {
                         &branch,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
                     )?;
                     let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
                     let signed_weight = tx.weight();
@@ -842,6 +848,7 @@ impl Cli {
                     &option_branch,
                     config.address_params(),
                     *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
                 )?;
 
                 let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
@@ -1053,6 +1060,7 @@ impl Cli {
                         &branch,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
                     )?;
                     let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
                     let signed_weight = tx.weight();
@@ -1088,6 +1096,7 @@ impl Cli {
                     &option_branch,
                     config.address_params(),
                     *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
                 )?;
 
                 let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
@@ -1258,6 +1267,7 @@ impl Cli {
                         &branch,
                         config.address_params(),
                         *LIQUID_TESTNET_GENESIS,
+                        TrackerLogLevel::None,
                     )?;
                     let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;
                     let signed_weight = tx.weight();
@@ -1294,6 +1304,7 @@ impl Cli {
                     &option_branch,
                     config.address_params(),
                     *LIQUID_TESTNET_GENESIS,
+                    TrackerLogLevel::None,
                 )?;
 
                 let tx = sign_p2pk_inputs(tx, &utxos, &wallet, config.address_params(), 1)?;

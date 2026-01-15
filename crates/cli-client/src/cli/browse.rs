@@ -1,12 +1,11 @@
 use crate::cli::Cli;
-use crate::cli::interactive::{
-    SwapDisplay, TokenDisplay, format_relative_time, format_settlement_asset, truncate_with_ellipsis,
-};
-use crate::cli::tables::{display_swap_table, display_token_table};
+use crate::cli::interactive::{TokenDisplay, format_relative_time, format_settlement_asset, truncate_with_ellipsis};
+use crate::cli::option_offer::ActiveOptionOfferDisplay;
+use crate::cli::tables::{display_active_option_offers_table, display_token_table};
 use crate::config::Config;
 use crate::error::Error;
 
-use options_relay::{OptionCreatedEvent, SwapCreatedEvent};
+use options_relay::{OptionCreatedEvent, OptionOfferCreatedEvent};
 use simplicityhl::elements::AssetId;
 use simplicityhl::elements::hex::ToHex;
 use simplicityhl_core::LIQUID_TESTNET_BITCOIN_ASSET;
@@ -15,7 +14,7 @@ impl Cli {
     pub(crate) async fn run_browse(&self, config: Config) -> Result<(), Error> {
         let client = self.get_read_only_client(&config).await?;
 
-        println!("Browsing available options and swaps from NOSTR...");
+        println!("Browsing available options and option offers from NOSTR...");
         println!();
 
         let options_results = client.fetch_options(config.address_params()).await?;
@@ -47,23 +46,24 @@ impl Cli {
 
         println!();
 
-        let swaps_results = client.fetch_swaps(config.address_params()).await?;
-        let valid_swaps: Vec<SwapCreatedEvent> = swaps_results.into_iter().filter_map(Result::ok).collect();
+        let offers_results = client.fetch_option_offers(config.address_params()).await?;
+        let valid_offers: Vec<OptionOfferCreatedEvent> = offers_results.into_iter().filter_map(Result::ok).collect();
 
-        println!("Available Swaps (from NOSTR):");
-        println!("-----------------------------");
+        println!("Available Option Offers (from NOSTR):");
+        println!("-------------------------------------");
 
-        if valid_swaps.is_empty() {
-            println!("  (No swaps found)");
+        if valid_offers.is_empty() {
+            println!("  (No option offers found)");
         } else {
-            let swap_displays: Vec<SwapDisplay> = valid_swaps
+            let offer_displays: Vec<ActiveOptionOfferDisplay> = valid_offers
                 .iter()
                 .enumerate()
                 .map(|(idx, event)| {
-                    let args = &event.swap_args;
-                    SwapDisplay {
+                    let args = &event.option_offer_args;
+                    ActiveOptionOfferDisplay {
                         index: idx + 1,
                         offering: format_asset_amount(args.collateral_per_contract(), args.get_collateral_asset_id()),
+                        price: args.collateral_per_contract().to_string(),
                         wants: format_settlement_asset(&args.get_settlement_asset_id()),
                         expires: format_relative_time(i64::from(args.expiry_time())),
                         seller: truncate_with_ellipsis(&event.pubkey.to_hex(), 12),
@@ -71,8 +71,8 @@ impl Cli {
                 })
                 .collect();
 
-            display_swap_table(&swap_displays);
-            println!("  (Note: Actual availability shown in `swap take` after syncing)");
+            display_active_option_offers_table(&offer_displays);
+            println!("  (Note: Actual availability shown in `option-offer take` after syncing)");
         }
 
         client.disconnect().await;
@@ -81,7 +81,7 @@ impl Cli {
         println!("To interact with these offers:");
         println!("  1. Run `sync nostr` to sync events to your local wallet");
         println!("  2. Run `sync spent` to update UTXO status from blockchain");
-        println!("  3. Run `swap take` to take a swap offer");
+        println!("  3. Run `option-offer take` to take an option offer");
 
         Ok(())
     }

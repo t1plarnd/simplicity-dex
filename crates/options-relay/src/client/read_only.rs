@@ -1,7 +1,7 @@
 use crate::config::NostrRelayConfig;
 use crate::error::{ParseError, RelayError};
 use crate::events::kinds::TAG_EXPIRY;
-use crate::events::{ActionCompletedEvent, OptionCreatedEvent, SwapCreatedEvent, filters};
+use crate::events::{ActionCompletedEvent, OptionCreatedEvent, OptionOfferCreatedEvent, filters};
 
 use nostr::prelude::*;
 use nostr_sdk::Client;
@@ -68,15 +68,15 @@ impl ReadOnlyClient {
             .collect())
     }
 
-    pub async fn fetch_swaps(
+    pub async fn fetch_option_offers(
         &self,
         params: &'static AddressParams,
-    ) -> Result<Vec<Result<SwapCreatedEvent, ParseError>>, RelayError> {
-        let events = self.fetch_events(filters::swap_created()).await?;
+    ) -> Result<Vec<Result<OptionOfferCreatedEvent, ParseError>>, RelayError> {
+        let events = self.fetch_events(filters::option_offer_created()).await?;
         Ok(events
             .iter()
             .filter(|e| is_active(e))
-            .map(|e| SwapCreatedEvent::from_event(e, params))
+            .map(|e| OptionOfferCreatedEvent::from_event(e, params))
             .collect())
     }
 
