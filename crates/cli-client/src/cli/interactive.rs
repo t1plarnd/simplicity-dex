@@ -14,7 +14,6 @@ use simplicityhl_core::LIQUID_TESTNET_BITCOIN_ASSET;
 
 pub const OPTION_TOKEN_TAG: &str = "option_token";
 pub const GRANTOR_TOKEN_TAG: &str = "grantor_token";
-pub const SWAP_COLLATERAL_TAG: &str = "swap_collateral";
 
 #[derive(Debug, Clone)]
 pub struct TokenDisplay {
@@ -23,15 +22,6 @@ pub struct TokenDisplay {
     pub settlement: String,
     pub expires: String,
     pub status: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SwapDisplay {
-    pub index: usize,
-    pub offering: String,
-    pub wants: String,
-    pub expires: String,
-    pub seller: String,
 }
 
 /// Format a past timestamp as "X ago" for history entries.
@@ -133,7 +123,7 @@ pub fn prompt_selection(prompt: &str, max: usize) -> io::Result<Option<usize>> {
         Ok(n) if n >= 1 && n <= max => Ok(Some(n - 1)), // Convert to 0-based
         _ => {
             println!("Invalid selection. Please enter a number between 1 and {max}.");
-            prompt_selection(prompt, max) // Retry
+            prompt_selection(prompt, max)
         }
     }
 }
@@ -149,7 +139,7 @@ pub fn prompt_amount(prompt: &str) -> io::Result<u64> {
     input.parse::<u64>().map_or_else(
         |_| {
             println!("Invalid amount. Please enter a positive number.");
-            prompt_amount(prompt) // Retry
+            prompt_amount(prompt)
         },
         Ok,
     )
@@ -398,6 +388,163 @@ pub async fn format_asset_value_with_tag(
         (Some(v), None) => format!("{v} (unknown)"),
         _ => "Confidential".to_string(),
     }
+}
+
+/// Display struct for wallet assets grouped by asset ID.
+#[derive(Debug, Clone)]
+pub struct WalletAssetDisplay {
+    pub index: usize,
+    pub asset_id: simplicityhl::elements::AssetId,
+    pub asset_name: String,
+    pub balance: u64,
+    /// Tag for contract tokens (e.g., "`option_token`", "`grantor_token`"), None for regular assets
+    pub tag: Option<String>,
+}
+
+/// Get wallet assets grouped by asset ID with total balances.
+///
+/// Queries all UTXOs belonging to the user's script pubkey and groups them by asset,
+/// summing up the balances. For contract tokens (option/grantor), displays the tag
+/// with a truncated contract address prefix.
+pub async fn get_wallet_assets(
+    wallet: &crate::wallet::Wallet,
+    user_script_pubkey: &Script,
+) -> Result<Vec<WalletAssetDisplay>, Error> {
+    use std::collections::HashMap;
+
+    let filter = UtxoFilter::new().script_pubkey(user_script_pubkey.clone());
+
+    let results = <_ as UtxoStore>::query_utxos(wallet.store(), &[filter]).await?;
+    let entries = extract_entries_from_results(results);
+
+    let mut asset_balances: HashMap<simplicityhl::elements::AssetId, u64> = HashMap::new();
+
+    for entry in entries {
+        if let (Some(asset_id), Some(value)) = (entry.asset(), entry.value()) {
+            *asset_balances.entry(asset_id).or_insert(0) += value;
+        }
+    }
+
+    let mut displays: Vec<WalletAssetDisplay> = Vec::with_capacity(asset_balances.len());
+
+    for (asset_id, balance) in asset_balances {
+        let (asset_name, tag) = format_asset_name_with_contract_info(wallet.store(), &asset_id).await;
+        displays.push(WalletAssetDisplay {
+            index: 0, // Will be set after sorting
+            asset_id,
+            asset_name,
+            balance,
+            tag,
+        });
+    }
+
+    displays.sort_by(|a, b| {
+        let a_is_lbtc = a.asset_id == *LIQUID_TESTNET_BITCOIN_ASSET;
+        let b_is_lbtc = b.asset_id == *LIQUID_TESTNET_BITCOIN_ASSET;
+        match (a_is_lbtc, b_is_lbtc) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => b.balance.cmp(&a.balance),
+        }
+    });
+
+    for (idx, display) in displays.iter_mut().enumerate() {
+        display.index = idx + 1;
+    }
+
+    Ok(displays)
+}
+
+/// Format an asset name with contract info lookup.
+///
+/// Returns (`display_name`, tag) where:
+/// - For LBTC: ("LBTC", None)
+/// - For contract tokens: ("tag (`contract_addr`)", Some(tag))
+/// - For unknown assets: ("(`hex_prefix`)...", None)
+async fn format_asset_name_with_contract_info(
+    store: &coin_store::Store,
+    asset_id: &simplicityhl::elements::AssetId,
+) -> (String, Option<String>) {
+    use simplicityhl::elements::hex::ToHex;
+
+    if *asset_id == *LIQUID_TESTNET_BITCOIN_ASSET {
+        return ("LBTC".to_string(), None);
+    }
+
+    if let Ok(Some((taproot_pubkey_gen, tag))) = <_ as UtxoStore>::get_contract_by_token(store, *asset_id).await {
+        let contract_addr = taproot_pubkey_gen
+            .split(':')
+            .next_back()
+            .map_or_else(|| "???".to_string(), |addr| truncate_with_ellipsis(addr, 12));
+
+        let display_name = format!("{tag} ({contract_addr})");
+        return (display_name, Some(tag));
+    }
+
+    // Fallback to truncated hex
+    let hex = asset_id.to_hex();
+    let display_name = format!("({})...", &hex[..hex.len().min(8)]);
+    (display_name, None)
+}
+
+/// Filter wallet assets to exclude option and grantor tokens.
+///
+/// Use this when selecting premium or settlement assets, where contract tokens
+/// don't make sense as payment.
+#[must_use]
+pub fn filter_non_contract_assets(assets: &[WalletAssetDisplay]) -> Vec<&WalletAssetDisplay> {
+    assets
+        .iter()
+        .filter(|a| {
+            a.tag
+                .as_ref()
+                .is_none_or(|t| t != OPTION_TOKEN_TAG && t != GRANTOR_TOKEN_TAG)
+        })
+        .collect()
+}
+
+/// Interactively select an asset from the wallet.
+///
+/// Displays a table of available assets and prompts the user to select one.
+/// If `exclude_contract_tokens` is true, option and grantor tokens are filtered out.
+pub fn select_asset_interactive<'a>(
+    assets: &'a [WalletAssetDisplay],
+    prompt: &str,
+    exclude_contract_tokens: bool,
+) -> Result<&'a WalletAssetDisplay, Error> {
+    use crate::cli::tables::display_wallet_assets_table;
+
+    let filtered: Vec<&WalletAssetDisplay> = if exclude_contract_tokens {
+        filter_non_contract_assets(assets)
+    } else {
+        assets.iter().collect()
+    };
+
+    if filtered.is_empty() {
+        return Err(Error::Config("No assets found in wallet".to_string()));
+    }
+
+    let display_assets: Vec<WalletAssetDisplay> = filtered
+        .iter()
+        .enumerate()
+        .map(|(idx, a)| WalletAssetDisplay {
+            index: idx + 1,
+            asset_id: a.asset_id,
+            asset_name: a.asset_name.clone(),
+            balance: a.balance,
+            tag: a.tag.clone(),
+        })
+        .collect();
+
+    println!("\nAvailable assets in wallet:");
+    display_wallet_assets_table(&display_assets);
+    println!();
+
+    let selection = prompt_selection(prompt, filtered.len())
+        .map_err(Error::Io)?
+        .ok_or_else(|| Error::Config("Selection cancelled".to_string()))?;
+
+    Ok(filtered[selection])
 }
 
 #[cfg(test)]

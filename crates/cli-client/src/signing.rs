@@ -1,4 +1,5 @@
 use simplicityhl::elements::{AddressParams, Transaction, TxOut};
+use simplicityhl::tracker::TrackerLogLevel;
 use simplicityhl_core::{LIQUID_TESTNET_GENESIS, finalize_p2pk_transaction};
 
 use crate::error::Error;
@@ -44,6 +45,7 @@ pub fn sign_p2pk_inputs(
             i,
             params,
             *LIQUID_TESTNET_GENESIS,
+            TrackerLogLevel::None,
         )?;
     }
 

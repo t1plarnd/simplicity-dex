@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use coin_store::UtxoStore;
+use contracts::option_offer::OPTION_OFFER_SOURCE;
 use contracts::options::OPTION_SOURCE;
-use contracts::swap_with_change::SWAP_WITH_CHANGE_SOURCE;
-use options_relay::{OptionCreatedEvent, SwapCreatedEvent};
+use options_relay::{OptionCreatedEvent, OptionOfferCreatedEvent};
 use simplicityhl::elements::hex::ToHex;
 use simplicityhl::elements::{OutPoint, Txid};
 use simplicityhl_core::derive_public_blinder_key;
@@ -16,7 +16,8 @@ use crate::explorer::{
     esplora_utxo_to_outpoint, fetch_address_utxos, fetch_outspends, fetch_scripthash_utxos, fetch_tip_height,
     fetch_transaction,
 };
-use crate::sync::{sync_option_event, sync_swap_event};
+use crate::sync::{sync_option_event, sync_option_offer_event};
+use options_relay::ReadOnlyClient;
 
 #[derive(Default)]
 struct SyncStats {
@@ -25,7 +26,9 @@ struct SyncStats {
     new_utxos_discovered: usize,
     new_utxos_imported: usize,
     nostr_options_synced: usize,
-    nostr_swaps_synced: usize,
+    nostr_option_offers_synced: usize,
+    history_contracts_checked: usize,
+    history_actions_synced: usize,
     errors: Vec<String>,
 }
 
@@ -38,7 +41,9 @@ impl SyncStats {
         println!("New UTXOs discovered: {}", self.new_utxos_discovered);
         println!("New UTXOs imported:   {}", self.new_utxos_imported);
         println!("NOSTR options synced: {}", self.nostr_options_synced);
-        println!("NOSTR swaps synced:   {}", self.nostr_swaps_synced);
+        println!("NOSTR option offers synced: {}", self.nostr_option_offers_synced);
+        println!("History contracts checked: {}", self.history_contracts_checked);
+        println!("History actions synced: {}", self.history_actions_synced);
 
         if !self.errors.is_empty() {
             println!();
@@ -64,7 +69,7 @@ impl Cli {
         }
     }
 
-    /// Full sync: mark spent UTXOs + discover new UTXOs + sync NOSTR events
+    /// Full sync: mark spent UTXOs + discover new UTXOs + sync NOSTR events + sync history
     async fn run_sync_full(&self, config: Config) -> Result<(), Error> {
         println!("Starting full sync...");
         println!();
@@ -73,17 +78,26 @@ impl Cli {
 
         // Step 1: Discover new UTXOs
         println!();
-        println!("[1/3] Discovering new UTXOs via Esplora...");
+        println!("[1/4] Discovering new UTXOs via Esplora...");
         self.sync_discover_utxos(&config, &mut stats).await?;
+
+        let client = self.get_read_only_client(&config).await?;
 
         // Step 2: Sync NOSTR events
         println!();
-        println!("[2/3] Syncing from NOSTR relay...");
-        self.sync_nostr_events(&config, &mut stats).await?;
+        println!("[2/4] Syncing from NOSTR relay...");
+        self.sync_nostr_events_with_client(&config, &mut stats, &client).await?;
 
         // Step 3: Mark spent UTXOs
-        println!("[3/3] Checking for spent UTXOs via Esplora...");
+        println!("[3/4] Checking for spent UTXOs via Esplora...");
         self.sync_spent_utxos(&config, &mut stats).await?;
+
+        // Step 4: Sync action history for existing contracts
+        println!();
+        println!("[4/4] Syncing action history from NOSTR...");
+        self.sync_history_with_client(&config, &mut stats, &client).await?;
+
+        client.disconnect().await;
 
         stats.print_summary();
 
@@ -114,7 +128,7 @@ impl Cli {
         Ok(())
     }
 
-    /// Only sync options and swaps from NOSTR relay
+    /// Only sync options and option offers from NOSTR relay
     async fn run_sync_nostr(&self, config: Config) -> Result<(), Error> {
         println!("Syncing from NOSTR relay...");
         println!();
@@ -141,13 +155,13 @@ impl Cli {
 
         let option_contracts =
             <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_SOURCE).await?;
-        let swap_contracts =
-            <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), SWAP_WITH_CHANGE_SOURCE).await?;
+        let option_offer_contracts =
+            <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_OFFER_SOURCE).await?;
 
         println!(
-            "  Found {} option contracts and {} swap contracts",
+            "  Found {} option contracts and {} option offer contracts",
             option_contracts.len(),
-            swap_contracts.len()
+            option_offer_contracts.len()
         );
 
         // Process option contracts
@@ -216,8 +230,8 @@ impl Cli {
             }
         }
 
-        // Process swap contracts
-        for (args_bytes, tpg_str, metadata_bytes) in &swap_contracts {
+        // Process option offer contracts
+        for (args_bytes, tpg_str, metadata_bytes) in &option_offer_contracts {
             let Some(meta_bytes) = metadata_bytes else {
                 continue;
             };
@@ -242,15 +256,15 @@ impl Cli {
                 continue;
             };
 
-            let Ok(swap_args) = contracts::swap_with_change::SwapWithChangeArguments::from_arguments(&args) else {
+            let Ok(option_offer_args) = contracts::option_offer::OptionOfferArguments::from_arguments(&args) else {
                 continue;
             };
 
             let Ok(taproot_pubkey_gen) = contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen::build_from_str(
                 tpg_str,
-                &swap_args,
+                &option_offer_args,
                 config.address_params(),
-                &contracts::swap_with_change::get_swap_with_change_address,
+                &contracts::option_offer::get_option_offer_address,
             ) else {
                 errors.push(format!(
                     "Invalid taproot pubkey gen: {}",
@@ -495,10 +509,22 @@ impl Cli {
         }
     }
 
-    /// Sync options and swaps from NOSTR relay.
+    /// Sync options and option offers from NOSTR relay (creates its own client).
     async fn sync_nostr_events(&self, config: &Config, stats: &mut SyncStats) -> Result<(), Error> {
-        let wallet = self.get_wallet(config).await?;
         let client = self.get_read_only_client(config).await?;
+        self.sync_nostr_events_with_client(config, stats, &client).await?;
+        client.disconnect().await;
+        Ok(())
+    }
+
+    /// Sync options and option offers from NOSTR relay using provided client.
+    async fn sync_nostr_events_with_client(
+        &self,
+        config: &Config,
+        stats: &mut SyncStats,
+        client: &ReadOnlyClient,
+    ) -> Result<(), Error> {
+        let wallet = self.get_wallet(config).await?;
 
         println!("  Fetching options from NOSTR...");
         let options_results = client.fetch_options(config.address_params()).await?;
@@ -528,34 +554,34 @@ impl Cli {
             println!("    ({options_already_synced} options already synced)");
         }
 
-        println!("  Fetching swaps from NOSTR...");
-        let swaps_results = client.fetch_swaps(config.address_params()).await?;
-        let valid_swaps: Vec<SwapCreatedEvent> = swaps_results.into_iter().filter_map(Result::ok).collect();
+        println!("  Fetching option offers from NOSTR...");
+        let offers_results = client.fetch_option_offers(config.address_params()).await?;
+        let valid_offers: Vec<OptionOfferCreatedEvent> = offers_results.into_iter().filter_map(Result::ok).collect();
 
-        println!("    Found {} valid swaps", valid_swaps.len());
+        println!("    Found {} valid option offers", valid_offers.len());
 
         let mut actions_synced = 0;
-        let mut swaps_already_synced = 0;
-        for swap in &valid_swaps {
-            // First sync the swap contract itself
-            let arguments = swap.swap_args.build_arguments();
-            match sync_swap_event(wallet.store(), swap, SWAP_WITH_CHANGE_SOURCE, arguments, None).await {
+        let mut offers_already_synced = 0;
+        for offer in &valid_offers {
+            // First sync the option offer contract itself
+            let arguments = offer.option_offer_args.build_arguments();
+            match sync_option_offer_event(wallet.store(), offer, OPTION_OFFER_SOURCE, arguments, None).await {
                 Ok(()) => {
-                    stats.nostr_swaps_synced += 1;
+                    stats.nostr_option_offers_synced += 1;
                 }
                 Err(e) => {
                     // Ignore duplicate errors (already synced)
                     if e.to_string().contains("UNIQUE constraint") {
-                        swaps_already_synced += 1;
+                        offers_already_synced += 1;
                     } else {
                         stats
                             .errors
-                            .push(format!("Failed to sync swap {}: {}", swap.event_id, e));
+                            .push(format!("Failed to sync option offer {}: {}", offer.event_id, e));
                     }
                 }
             }
 
-            if let Ok(actions) = client.fetch_actions_for_event(swap.event_id).await {
+            if let Ok(actions) = client.fetch_actions_for_event(offer.event_id).await {
                 for action in actions.into_iter().flatten() {
                     #[allow(clippy::cast_possible_wrap)]
                     let timestamp = action.created_at.as_secs() as i64;
@@ -567,7 +593,7 @@ impl Cli {
                     );
 
                     if let Ok(added) =
-                        crate::sync::add_history_entry_if_new(wallet.store(), &swap.taproot_pubkey_gen, entry).await
+                        crate::sync::add_history_entry_if_new(wallet.store(), &offer.taproot_pubkey_gen, entry).await
                         && added
                     {
                         actions_synced += 1;
@@ -580,15 +606,183 @@ impl Cli {
             }
         }
 
-        if swaps_already_synced > 0 {
-            println!("    ({swaps_already_synced} swaps already synced)");
+        if offers_already_synced > 0 {
+            println!("    ({offers_already_synced} option offers already synced)");
         }
 
+        println!(
+            "  Synced {} new options, {} new option offers, {} action events.",
+            stats.nostr_options_synced, stats.nostr_option_offers_synced, actions_synced
+        );
+
+        Ok(())
+    }
+
+    /// Sync action history for existing contracts from NOSTR (creates its own client).
+    #[allow(dead_code)]
+    async fn sync_history(&self, config: &Config, stats: &mut SyncStats) -> Result<(), Error> {
+        let client = self.get_read_only_client(config).await?;
+        self.sync_history_with_client(config, stats, &client).await?;
         client.disconnect().await;
+        Ok(())
+    }
+
+    /// Sync action history for existing contracts from NOSTR using provided client.
+    #[allow(clippy::too_many_lines)]
+    async fn sync_history_with_client(
+        &self,
+        config: &Config,
+        stats: &mut SyncStats,
+        client: &ReadOnlyClient,
+    ) -> Result<(), Error> {
+        let wallet = self.get_wallet(config).await?;
+
+        let option_contracts =
+            <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_SOURCE).await?;
+        let option_offer_contracts =
+            <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_OFFER_SOURCE).await?;
 
         println!(
-            "  Synced {} new options, {} new swaps, {} action events.",
-            stats.nostr_options_synced, stats.nostr_swaps_synced, actions_synced
+            "  Found {} option contracts and {} option offer contracts",
+            option_contracts.len(),
+            option_offer_contracts.len()
+        );
+
+        // Process option contracts
+        for (args_bytes, tpg_str, metadata_bytes) in &option_contracts {
+            let Some(meta_bytes) = metadata_bytes else {
+                continue;
+            };
+
+            let Ok(metadata) = crate::metadata::ContractMetadata::from_bytes(meta_bytes) else {
+                continue;
+            };
+
+            let Some(nostr_event_id_str) = &metadata.nostr_event_id else {
+                continue;
+            };
+
+            let Ok(event_id) = nostr::EventId::from_hex(nostr_event_id_str) else {
+                stats.errors.push(format!("Invalid event ID: {nostr_event_id_str}"));
+                continue;
+            };
+
+            let Ok((args, _)) = bincode::serde::decode_from_slice::<simplicityhl::Arguments, _>(
+                args_bytes,
+                bincode::config::standard(),
+            ) else {
+                continue;
+            };
+
+            let Ok(options_args) = contracts::options::OptionsArguments::from_arguments(&args) else {
+                continue;
+            };
+
+            let Ok(taproot_pubkey_gen) = contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen::build_from_str(
+                tpg_str,
+                &options_args,
+                config.address_params(),
+                &contracts::options::get_options_address,
+            ) else {
+                stats.errors.push(format!(
+                    "Invalid taproot pubkey gen: {}",
+                    &tpg_str[..tpg_str.len().min(20)]
+                ));
+                continue;
+            };
+
+            stats.history_contracts_checked += 1;
+
+            if let Ok(actions) = client.fetch_actions_for_event(event_id).await {
+                for action in actions.into_iter().flatten() {
+                    #[allow(clippy::cast_possible_wrap)]
+                    let timestamp = action.created_at.as_secs() as i64;
+                    let entry = crate::metadata::HistoryEntry::with_txid_and_nostr(
+                        action.action.as_str(),
+                        &action.outpoint.txid.to_string(),
+                        &action.event_id.to_hex(),
+                        timestamp,
+                    );
+
+                    if let Ok(added) =
+                        crate::sync::add_history_entry_if_new(wallet.store(), &taproot_pubkey_gen, entry).await
+                        && added
+                    {
+                        stats.history_actions_synced += 1;
+                    }
+                }
+            }
+        }
+
+        // Process option offer contracts
+        for (args_bytes, tpg_str, metadata_bytes) in &option_offer_contracts {
+            let Some(meta_bytes) = metadata_bytes else {
+                continue;
+            };
+
+            let Ok(metadata) = crate::metadata::ContractMetadata::from_bytes(meta_bytes) else {
+                continue;
+            };
+
+            let Some(nostr_event_id_str) = &metadata.nostr_event_id else {
+                continue;
+            };
+
+            let Ok(event_id) = nostr::EventId::from_hex(nostr_event_id_str) else {
+                stats.errors.push(format!("Invalid event ID: {nostr_event_id_str}"));
+                continue;
+            };
+
+            let Ok((args, _)) = bincode::serde::decode_from_slice::<simplicityhl::Arguments, _>(
+                args_bytes,
+                bincode::config::standard(),
+            ) else {
+                continue;
+            };
+
+            let Ok(option_offer_args) = contracts::option_offer::OptionOfferArguments::from_arguments(&args) else {
+                continue;
+            };
+
+            let Ok(taproot_pubkey_gen) = contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen::build_from_str(
+                tpg_str,
+                &option_offer_args,
+                config.address_params(),
+                &contracts::option_offer::get_option_offer_address,
+            ) else {
+                stats.errors.push(format!(
+                    "Invalid taproot pubkey gen: {}",
+                    &tpg_str[..tpg_str.len().min(20)]
+                ));
+                continue;
+            };
+
+            stats.history_contracts_checked += 1;
+
+            if let Ok(actions) = client.fetch_actions_for_event(event_id).await {
+                for action in actions.into_iter().flatten() {
+                    #[allow(clippy::cast_possible_wrap)]
+                    let timestamp = action.created_at.as_secs() as i64;
+                    let entry = crate::metadata::HistoryEntry::with_txid_and_nostr(
+                        action.action.as_str(),
+                        &action.outpoint.txid.to_string(),
+                        &action.event_id.to_hex(),
+                        timestamp,
+                    );
+
+                    if let Ok(added) =
+                        crate::sync::add_history_entry_if_new(wallet.store(), &taproot_pubkey_gen, entry).await
+                        && added
+                    {
+                        stats.history_actions_synced += 1;
+                    }
+                }
+            }
+        }
+
+        println!(
+            "  Checked {} contracts, synced {} actions.",
+            stats.history_contracts_checked, stats.history_actions_synced
         );
 
         Ok(())

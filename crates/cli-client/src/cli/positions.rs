@@ -10,9 +10,9 @@ use crate::error::Error;
 use crate::metadata::ContractMetadata;
 
 use coin_store::{Store, UtxoEntry, UtxoFilter, UtxoQueryResult, UtxoStore};
+use contracts::option_offer::{OPTION_OFFER_SOURCE, OptionOfferArguments, get_option_offer_address};
 use contracts::options::{OPTION_SOURCE, OptionsArguments, get_options_address};
 use contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen;
-use contracts::swap_with_change::{SWAP_WITH_CHANGE_SOURCE, SwapWithChangeArguments};
 use simplicityhl::elements::Address;
 
 /// Result type for contract info queries: (metadata, arguments, `taproot_pubkey_gen`)
@@ -49,15 +49,15 @@ impl Cli {
         display_user_token_table(&user_token_displays);
         println!();
 
-        let swap_filter = UtxoFilter::new().source(SWAP_WITH_CHANGE_SOURCE);
-        let swap_results = <_ as UtxoStore>::query_utxos(wallet.store(), &[swap_filter]).await?;
-        let swap_entries = extract_entries(swap_results);
+        let option_offer_filter = UtxoFilter::new().source(OPTION_OFFER_SOURCE);
+        let option_offer_results = <_ as UtxoStore>::query_utxos(wallet.store(), &[option_offer_filter]).await?;
+        let option_offer_entries = extract_entries(option_offer_results);
 
-        let swap_displays = build_swap_displays_with_args(&wallet, &swap_entries).await;
+        let option_offer_displays = build_option_offer_displays_with_args(&wallet, &option_offer_entries).await;
 
-        println!("Pending Swaps:");
-        println!("--------------");
-        display_token_table(&swap_displays);
+        println!("Pending Option Offers:");
+        println!("----------------------");
+        display_token_table(&option_offer_displays);
 
         println!();
         println!("Contract History:");
@@ -65,8 +65,8 @@ impl Cli {
 
         let option_contracts =
             <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_SOURCE).await?;
-        let swap_contracts =
-            <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), SWAP_WITH_CHANGE_SOURCE).await?;
+        let option_offer_contracts =
+            <_ as UtxoStore>::list_contracts_by_source_with_metadata(wallet.store(), OPTION_OFFER_SOURCE).await?;
 
         let mut contracts_with_history: Vec<(&str, Address, ContractMetadata, i64)> = Vec::new();
 
@@ -94,7 +94,7 @@ impl Cli {
             }
         }
 
-        for (args_bytes, tpg_str, metadata_bytes) in &swap_contracts {
+        for (args_bytes, tpg_str, metadata_bytes) in &option_offer_contracts {
             if let Some(bytes) = metadata_bytes
                 && let Ok(metadata) = ContractMetadata::from_bytes(bytes)
                 && !metadata.history.is_empty()
@@ -105,19 +105,19 @@ impl Cli {
                 ) else {
                     continue;
                 };
-                let Ok(swap_args) = SwapWithChangeArguments::from_arguments(&args) else {
+                let Ok(option_offer_args) = OptionOfferArguments::from_arguments(&args) else {
                     continue;
                 };
                 let Ok(tpg) = TaprootPubkeyGen::build_from_str(
                     tpg_str,
-                    &swap_args,
+                    &option_offer_args,
                     config.address_params(),
-                    &contracts::swap_with_change::get_swap_with_change_address,
+                    &get_option_offer_address,
                 ) else {
                     continue;
                 };
                 let most_recent = metadata.history.iter().map(|h| h.timestamp).max().unwrap_or(0);
-                contracts_with_history.push(("Swap", tpg.address, metadata, most_recent));
+                contracts_with_history.push(("OptionOffer", tpg.address, metadata, most_recent));
             }
         }
 
@@ -301,7 +301,10 @@ fn build_user_token_displays(
     displays
 }
 
-async fn build_swap_displays_with_args(wallet: &crate::wallet::Wallet, entries: &[UtxoEntry]) -> Vec<TokenDisplay> {
+async fn build_option_offer_displays_with_args(
+    wallet: &crate::wallet::Wallet,
+    entries: &[UtxoEntry],
+) -> Vec<TokenDisplay> {
     let mut displays = Vec::new();
     let mut display_idx = 0;
 
@@ -310,7 +313,7 @@ async fn build_swap_displays_with_args(wallet: &crate::wallet::Wallet, entries: 
         let contract_info = <_ as UtxoStore>::get_contract_by_script_pubkey(wallet.store(), &script_pubkey).await;
 
         let Some((settlement, expires, is_collateral, price)) =
-            extract_swap_display_info_with_tags(wallet.store(), contract_info, entry).await
+            extract_option_offer_display_info_with_tags(wallet.store(), contract_info, entry).await
         else {
             continue;
         };
@@ -335,7 +338,7 @@ async fn build_swap_displays_with_args(wallet: &crate::wallet::Wallet, entries: 
 }
 
 /// Returns (`settlement_display`, `expiry_display`, `is_collateral_asset`, price)
-async fn extract_swap_display_info_with_tags(
+async fn extract_option_offer_display_info_with_tags(
     store: &Store,
     contract_info: ContractInfoResult,
     entry: &UtxoEntry,
@@ -346,13 +349,15 @@ async fn extract_swap_display_info_with_tags(
         bincode::serde::decode_from_slice::<simplicityhl::Arguments, _>(&args_bytes, bincode::config::standard())
             .ok()?;
 
-    let swap_args = SwapWithChangeArguments::from_arguments(&args).ok()?;
+    let option_offer_args = OptionOfferArguments::from_arguments(&args).ok()?;
 
-    let settlement_str = format_asset_with_tag(store, &swap_args.get_settlement_asset_id()).await;
-    let expiry_str = format_relative_time(i64::from(swap_args.expiry_time()));
-    let price = swap_args.collateral_per_contract();
+    let settlement_str = format_asset_with_tag(store, &option_offer_args.get_settlement_asset_id()).await;
+    let expiry_str = format_relative_time(i64::from(option_offer_args.expiry_time()));
+    let price = option_offer_args.collateral_per_contract();
 
-    let is_collateral = entry.asset().is_some_and(|a| a == swap_args.get_collateral_asset_id());
+    let is_collateral = entry
+        .asset()
+        .is_some_and(|a| a == option_offer_args.get_collateral_asset_id());
 
     Some((settlement_str, expiry_str, is_collateral, price))
 }

@@ -21,10 +21,10 @@ pub enum Command {
         command: OptionCommand,
     },
 
-    /// Swap lifecycle (create, take, cancel, withdraw)
-    Swap {
+    /// Option Offer lifecycle (create, take, cancel, withdraw)
+    OptionOffer {
         #[command(subcommand)]
-        command: SwapCommand,
+        command: OptionOfferCommand,
     },
 
     /// Fetch options/swaps from NOSTR, sync to coin-store, display
@@ -242,23 +242,32 @@ pub enum OptionCommand {
     },
 }
 
-/// Swap lifecycle commands
+/// Option Offer lifecycle commands
 #[derive(Debug, Subcommand)]
-pub enum SwapCommand {
-    /// Create a swap offer (offer Grantor Token for premium)
+pub enum OptionOfferCommand {
+    /// Create an option offer (deposit collateral + premium for settlement)
     Create {
-        /// Grantor token outpoint (interactive selection if not provided)
+        /// Collateral asset ID to deposit (interactive selection if not provided)
         #[arg(long)]
-        grantor_token: Option<OutPoint>,
-        /// Premium asset ID (defaults to native LBTC)
+        collateral_asset: Option<AssetId>,
+        /// Amount of collateral to deposit (prompted if not provided)
+        #[arg(long)]
+        collateral_amount: Option<u64>,
+        /// Premium asset ID (interactive selection if not provided, excludes contract tokens)
         #[arg(long)]
         premium_asset: Option<AssetId>,
-        /// Premium amount
+        /// Total premium amount to deposit (used to calculate `premium_per_collateral`)
         #[arg(long)]
-        premium_amount: u64,
-        /// Expiry time (defaults to same as option)
+        premium_amount: Option<u64>,
+        /// Settlement asset ID (interactive selection if not provided, excludes contract tokens)
         #[arg(long)]
-        expiry: Option<String>,
+        settlement_asset: Option<AssetId>,
+        /// Total settlement amount expected (used to calculate `collateral_per_contract`)
+        #[arg(long)]
+        settlement_amount: Option<u64>,
+        /// Expiry time as Unix timestamp or duration (e.g., +30d)
+        #[arg(long)]
+        expiry: String,
         /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
         fee: Option<u64>,
@@ -267,11 +276,11 @@ pub enum SwapCommand {
         broadcast: bool,
     },
 
-    /// Take a swap offer (atomic swap: premium for Grantor Token)
+    /// Take an option offer (pay settlement to receive collateral + premium)
     Take {
-        /// Swap event ID from NOSTR (interactive selection if not provided)
+        /// Offer event ID from NOSTR (interactive selection if not provided)
         #[arg(long)]
-        swap_event: Option<String>,
+        offer_event: Option<String>,
         /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
         fee: Option<u64>,
@@ -280,11 +289,11 @@ pub enum SwapCommand {
         broadcast: bool,
     },
 
-    /// Cancel a swap offer after expiry (reclaim collateral if no one took it)
+    /// Cancel an option offer after expiry (reclaim collateral + premium)
     Cancel {
-        /// Swap event ID from NOSTR (interactive selection if not provided)
+        /// Offer event ID from NOSTR (interactive selection if not provided)
         #[arg(long)]
-        swap_event: Option<String>,
+        offer_event: Option<String>,
         /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
         fee: Option<u64>,
@@ -293,11 +302,11 @@ pub enum SwapCommand {
         broadcast: bool,
     },
 
-    /// Withdraw settlement after swap was taken (claim your payment)
+    /// Withdraw settlement after offer was taken (claim your payment)
     Withdraw {
-        /// Swap event ID from NOSTR (interactive selection if not provided)
+        /// Offer event ID from NOSTR (interactive selection if not provided)
         #[arg(long)]
-        swap_event: Option<String>,
+        offer_event: Option<String>,
         /// Fee amount in satoshis (auto-estimated if not specified)
         #[arg(long)]
         fee: Option<u64>,

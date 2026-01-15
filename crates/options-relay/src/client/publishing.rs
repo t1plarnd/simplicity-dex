@@ -1,6 +1,6 @@
 use crate::config::NostrRelayConfig;
 use crate::error::{ParseError, RelayError};
-use crate::events::{ActionCompletedEvent, OptionCreatedEvent, SwapCreatedEvent};
+use crate::events::{ActionCompletedEvent, OptionCreatedEvent, OptionOfferCreatedEvent};
 
 use std::sync::Arc;
 
@@ -74,7 +74,7 @@ impl PublishingClient {
         self.publish(builder).await
     }
 
-    pub async fn publish_swap_created(&self, event: &SwapCreatedEvent) -> Result<EventId, RelayError> {
+    pub async fn publish_option_offer_created(&self, event: &OptionOfferCreatedEvent) -> Result<EventId, RelayError> {
         let pubkey = self.public_key().await?;
         let builder = event.to_event_builder(pubkey)?;
         self.publish(builder).await
@@ -98,11 +98,11 @@ impl PublishingClient {
         self.reader.fetch_options(params).await
     }
 
-    pub async fn fetch_swaps(
+    pub async fn fetch_option_offers(
         &self,
         params: &'static AddressParams,
-    ) -> Result<Vec<Result<SwapCreatedEvent, ParseError>>, RelayError> {
-        self.reader.fetch_swaps(params).await
+    ) -> Result<Vec<Result<OptionOfferCreatedEvent, ParseError>>, RelayError> {
+        self.reader.fetch_option_offers(params).await
     }
 
     pub async fn fetch_actions_for_event(

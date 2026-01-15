@@ -1,6 +1,8 @@
-use crate::cli::interactive::{SwapDisplay, TokenDisplay};
+use crate::cli::interactive::{TokenDisplay, WalletAssetDisplay};
+use crate::cli::option_offer::{
+    ActiveOptionOfferDisplay, CancellableOptionOfferDisplay, WithdrawableOptionOfferDisplay,
+};
 use crate::cli::positions::{CollateralDisplay, UserTokenDisplay};
-use crate::cli::swap::{ActiveSwapDisplay, CancellableSwapDisplay, WithdrawableSwapDisplay};
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Attribute, Cell, Table};
 
@@ -23,24 +25,6 @@ impl TableData for TokenDisplay {
             self.settlement.clone(),
             self.expires.clone(),
             self.status.clone(),
-        ]
-    }
-}
-
-impl TableData for SwapDisplay {
-    fn get_header() -> Vec<String> {
-        vec!["#", "Price", "Wants", "Expires", "Seller"]
-            .into_iter()
-            .map(String::from)
-            .collect()
-    }
-    fn to_row(&self) -> Vec<String> {
-        vec![
-            self.index.to_string(),
-            self.offering.clone(),
-            self.wants.clone(),
-            self.expires.clone(),
-            self.seller.clone(),
         ]
     }
 }
@@ -82,7 +66,7 @@ impl TableData for UserTokenDisplay {
     }
 }
 
-impl TableData for ActiveSwapDisplay {
+impl TableData for ActiveOptionOfferDisplay {
     fn get_header() -> Vec<String> {
         vec!["#", "Offering", "Price", "Wants", "Expires", "Seller"]
             .into_iter()
@@ -101,9 +85,9 @@ impl TableData for ActiveSwapDisplay {
     }
 }
 
-impl TableData for CancellableSwapDisplay {
+impl TableData for CancellableOptionOfferDisplay {
     fn get_header() -> Vec<String> {
-        vec!["#", "Collateral", "Asset", "Expired", "Contract"]
+        vec!["#", "Collateral", "Premium", "Asset", "Expired", "Contract"]
             .into_iter()
             .map(String::from)
             .collect()
@@ -112,6 +96,7 @@ impl TableData for CancellableSwapDisplay {
         vec![
             self.index.to_string(),
             self.collateral.clone(),
+            self.premium.clone(),
             self.asset.clone(),
             self.expired.clone(),
             self.contract.clone(),
@@ -119,7 +104,7 @@ impl TableData for CancellableSwapDisplay {
     }
 }
 
-impl TableData for WithdrawableSwapDisplay {
+impl TableData for WithdrawableOptionOfferDisplay {
     fn get_header() -> Vec<String> {
         vec!["#", "Settlement Available", "Asset", "Contract"]
             .into_iter()
@@ -132,6 +117,19 @@ impl TableData for WithdrawableSwapDisplay {
             self.settlement.clone(),
             self.asset.clone(),
             self.contract.clone(),
+        ]
+    }
+}
+
+impl TableData for WalletAssetDisplay {
+    fn get_header() -> Vec<String> {
+        vec!["#", "Asset", "Balance"].into_iter().map(String::from).collect()
+    }
+    fn to_row(&self) -> Vec<String> {
+        vec![
+            self.index.to_string(),
+            self.asset_name.clone(),
+            self.balance.to_string(),
         ]
     }
 }
@@ -183,10 +181,6 @@ pub fn display_token_table(tokens: &[TokenDisplay]) {
     render_table(tokens, "No tokens found");
 }
 
-pub fn display_swap_table(swaps: &[SwapDisplay]) {
-    render_table(swaps, "No swaps found");
-}
-
 pub fn display_collateral_table(displays: &[CollateralDisplay]) {
     render_table(displays, "No locked assets found");
 }
@@ -195,18 +189,22 @@ pub fn display_user_token_table(displays: &[UserTokenDisplay]) {
     render_table(displays, "No option/grantor tokens found");
 }
 
-pub fn display_active_swaps_table(active_swaps: &[ActiveSwapDisplay]) {
-    render_table(active_swaps, "No swaps found");
+pub fn display_active_option_offers_table(active_offers: &[ActiveOptionOfferDisplay]) {
+    render_table(active_offers, "No option offers found");
 }
 
-pub fn display_cancellable_swaps_table(cancellable_swaps: &[CancellableSwapDisplay]) {
-    render_table(cancellable_swaps, "No cancellable swaps found");
+pub fn display_cancellable_option_offers_table(cancellable_offers: &[CancellableOptionOfferDisplay]) {
+    render_table(cancellable_offers, "No cancellable option offers found");
 }
 
-pub fn display_withdrawable_swaps_table(withdrawable_swaps: &[WithdrawableSwapDisplay]) {
-    render_table(withdrawable_swaps, "No withdrawable swaps found");
+pub fn display_withdrawable_option_offers_table(withdrawable_offers: &[WithdrawableOptionOfferDisplay]) {
+    render_table(withdrawable_offers, "No withdrawable option offers found");
 }
 
 pub fn display_utxo_table(utxos: &[UtxoDisplay]) {
     render_table(utxos, "No UTXOs found");
+}
+
+pub fn display_wallet_assets_table(assets: &[WalletAssetDisplay]) {
+    render_table(assets, "No assets found in wallet");
 }

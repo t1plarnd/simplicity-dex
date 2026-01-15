@@ -1,6 +1,6 @@
 use nostr::Filter;
 
-use crate::events::kinds::{ACTION_COMPLETED, OPTION_CREATED, SWAP_CREATED};
+use crate::events::kinds::{ACTION_COMPLETED, OPTION_CREATED, OPTION_OFFER_CREATED};
 
 #[must_use]
 pub fn option_created() -> Filter {
@@ -13,13 +13,13 @@ pub fn option_created_by_pubkey(pubkey: nostr::PublicKey) -> Filter {
 }
 
 #[must_use]
-pub fn swap_created() -> Filter {
-    Filter::new().kind(SWAP_CREATED)
+pub fn option_offer_created() -> Filter {
+    Filter::new().kind(OPTION_OFFER_CREATED)
 }
 
 #[must_use]
-pub fn swap_created_by_pubkey(pubkey: nostr::PublicKey) -> Filter {
-    Filter::new().kind(SWAP_CREATED).author(pubkey)
+pub fn option_offer_created_by_pubkey(pubkey: nostr::PublicKey) -> Filter {
+    Filter::new().kind(OPTION_OFFER_CREATED).author(pubkey)
 }
 
 #[must_use]
@@ -34,5 +34,5 @@ pub fn action_completed_for_event(original_event_id: nostr::EventId) -> Filter {
 
 #[must_use]
 pub fn all_option_events() -> Filter {
-    Filter::new().kinds([OPTION_CREATED, SWAP_CREATED, ACTION_COMPLETED])
+    Filter::new().kinds([OPTION_CREATED, OPTION_OFFER_CREATED, ACTION_COMPLETED])
 }
