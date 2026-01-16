@@ -121,7 +121,7 @@ pub async fn setup_db() -> (
             .await
             .expect("");
 
-        for (_i, output) in tx.output.iter().enumerate() {
+        for output in tx.output.iter() {
             let asset_id = match output.asset {
                 Asset::Explicit(id) => id,
 
