@@ -4,19 +4,15 @@ use std::str::FromStr;
 
 use coin_store::filter::UtxoFilter; 
 use coin_store::store::Store;
-use coin_store::executor::{UtxoStore, 
-   // unblind_or_explicit
-};
+use coin_store::executor::UtxoStore;
 
 use simplicityhl::elements::hashes::Hash;
 use simplicityhl::elements::{AssetId, OutPoint, TxOut, TxOutWitness, Txid, Script, AddressParams, Transaction};
 use simplicityhl::elements::confidential::{Asset, Nonce, Value as ConfidentialValue};
 use simplicityhl::simplicity::bitcoin::key::Keypair;
-use simplicityhl::elements::secp256k1_zkp::{SecretKey, ZERO_TWEAK};
+use simplicityhl::elements::secp256k1_zkp::SecretKey;
 use simplicityhl::simplicity::bitcoin::secp256k1::Secp256k1;
 use simplicityhl::elements::pset::PartiallySignedTransaction;
-
-//use simplicityhl::elements::issuance::{AssetId as IssuanceAssetId, ContractHash};
 
 use simplicityhl_core::{LIQUID_TESTNET_BITCOIN_ASSET, LIQUID_TESTNET_TEST_ASSET_ID_STR};
 
