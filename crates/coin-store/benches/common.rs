@@ -73,7 +73,6 @@ fn setup_tx_and_contract(
             &AddressParams::LIQUID_TESTNET,
         )?;
 
-
         Ok((pst_and_tpg, option_arguments))
 }
   
@@ -102,16 +101,6 @@ pub async fn setup_db() -> (Store, (Vec<UtxoFilter>, Vec<UtxoFilter>, Vec<UtxoFi
         for (i, _output) in tx.output.iter().enumerate() {
             blinder_keys.insert(i, keypair); 
         }
-/* 
-        for input in &tx.input {
-            if input.has_issuance() && input.asset_issuance.asset_blinding_nonce == ZERO_TWEAK {
-                let contract_hash = ContractHash::from_byte_array(input.asset_issuance.asset_entropy);
-                let entropy = IssuanceAssetId::generate_asset_entropy(input.previous_output, contract_hash);
-                let asset_id = IssuanceAssetId::from_entropy(entropy);
-                println!("assetId before insrting: {}", asset_id);
-            }
-        }
-*/
         store.insert_transaction(&tx, blinder_keys).await.unwrap();
 
         let source_code = OPTION_SOURCE;
@@ -134,23 +123,22 @@ pub async fn setup_db() -> (Store, (Vec<UtxoFilter>, Vec<UtxoFilter>, Vec<UtxoFi
         store.insert_contract_token(
             &tpg_for_token.clone(),
             option_asset_id, 
-            "some name",
+            "Name of token",
         ).await.expect("");
 
         for (_i, output) in tx.output.iter().enumerate() {
             let asset_id = match output.asset {
+
                 Asset::Explicit(id) => {
-                    //println!("Explicit assetId: {}", id);
                     id
                 },
                 
                 Asset::Confidential(_) => {
-                    let unblinded = output.unblind(&secp, secret_key).expect("");
-                    //println!("Confidential assetId : {}", unblinded.asset);
+                    let unblinded = output.unblind(&secp, secret_key).expect("Missing blinding key");
                     unblinded.asset
                 },
 
-                _ => panic!(""),
+                _ => panic!("Match error"),
             };
 
             filters_default.push(
@@ -180,7 +168,7 @@ pub async fn setup_db() -> (Store, (Vec<UtxoFilter>, Vec<UtxoFilter>, Vec<UtxoFi
                     .required_value(1)
                     .include_entropy()
                     .taproot_pubkey_gen(tpg_for_filter.clone())
-                    .token_tag("some name")
+                    .token_tag("Name of token")
             );
         }
     }

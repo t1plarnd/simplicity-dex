@@ -6,7 +6,6 @@ use coin_store::executor::{UtxoStore};
 
 mod common;
 
-
 fn criterion_benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
@@ -23,14 +22,6 @@ fn criterion_benchmark(c: &mut Criterion) {
             store.query_utxos(black_box(&filters.1)).await.unwrap();
         })
     });
-
-    /* 
-    group.bench_function("optimized_implementation", |b| {
-        b.to_async(&rt).iter(|| async {
-            store.optimized_query_utxos(black_box(&filters)).await.unwrap();
-        })
-    });
-    */
 
     group.finish();
 
